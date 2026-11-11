@@ -1,0 +1,15 @@
+# secrets
+.env
+# private working documents
+paper/
+RESEARCH_NOTES.md
+PROPOSAL.md
+scripts/make_notebooks.py
+# rebuilt on each machine
+.venv/
+data/
+outputs/
+*.egg-info/
+__pycache__/
+.ipynb_checkpoints/
+.DS_Store

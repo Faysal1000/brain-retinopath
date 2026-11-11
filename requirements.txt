@@ -1,0 +1,21 @@
+# macOS (Apple silicon). Installed by scripts/setup.sh. Versions are the ones the code was run with.
+torch==2.15.0
+numpy==2.5.4
+scipy==1.18.1
+pandas==3.1.1
+nibabel==5.5.0
+dipy==1.12.1
+h5py==3.16.0
+pyyaml==6.0.3
+boto3==1.43.127
+requests==2.34.2
+tqdm==4.70.1
+joblib==1.6.0
+statsmodels==0.15.0
+matplotlib==3.11.2
+cvxpy==1.9.3
+jupyter==1.1.1
+ipykernel==7.4.0
+nbclient==0.11.0
+nbconvert==7.17.2
+nbformat==5.11.1

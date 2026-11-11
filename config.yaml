@@ -1,0 +1,191 @@
+# retinopath: one shared config for every notebook. Notebooks only set DEV_MODE and read this file.
+#
+# full: and dev: hold the experiment size. load_config copies one of them onto the top level: `full:` when
+# DEV_MODE=False (full experiment), `dev:` when DEV_MODE=True (small test run on a few subjects). A key in the chosen
+# block overrides the top-level key of the same name (e.g. dev: hemis). Keep the same keys in both blocks.
+#
+# Changing settings:
+#   - Cached (crops, fODFs, tractograms depend on them): seed, hemis, protocols, n_b0, crop_margin_mm, ref_voxel,
+#     sh_order_out, sh_order_in, shells_in, ref_model, wm_mask_thr, rumba_iters, tracking, seeds_per_vertex,
+#     nsd.seeds_per_vertex, nsd.flip_x.
+#     After changing one, delete data/cache (data/cache/dev for DEV); load_config refuses to run otherwise.
+#   - Free to change without clearing the cache: prf, n_null, stats (scores are recomputed from cached
+#     tractograms), model (networks must be retrained: delete outputs/models/<run>; the retrained run replaces
+#     the cached outputs of the old network).
+
+seed: 2026                  # global random seed (subject lists, noise, seeds, training). Cached.
+
+paths:                      # relative to this file
+  data: data
+  hcp: data/hcp             # raw HCP files (mirrors the S3 layout)
+  osf: data/osf             # HCP 7T retinotopy results
+  nsd: data/nsd
+  cache: data/cache         # crops, fODFs, tractography endpoints
+  out: outputs              # models, results, figures, run log
+  env_file: .env            # S3ACCESS_KEY / S3SECRET_KEY for hcp-openaccess
+
+# ---- experiment size -----------------------------------------------------------------
+# Every notebook logs its wall-clock hours to outputs/run_log.csv.
+# Subject lists are drawn once and saved to outputs/subjects.json; delete that file after changing any n_*.
+full:
+  n_test: 120               # test subjects with measured HCP 7T retinotopy. Max about 181 (a few lack 3T diffusion).
+                            # More = more statistical power; about 1.4 GB download and a few CPU minutes each, roughly linear.
+  n_train: 30               # training subjects: HCP subjects WITHOUT 7T data (about 900 available).
+                            # More = better networks, 1.4 GB download each; all training volumes are held in GPU memory.
+  n_val: 8                  # validation subjects from the same pool as n_train; same costs per subject.
+  n_7t: 40                  # test subjects also evaluated on their 7T diffusion scan; must be <= n_test.
+                            # Most of the 181 have one; about 1.1 GB each.
+  n_retest: 20              # HCP retest subjects that also have retinotopy; about 20 exist at most.
+  n_nsd: 8                  # NSD subjects, 0 to 8; about 4 GB per subject per diffusion run.
+  train_seeds: [0, 1]       # integer seeds; each extra seed adds one training run for `path` and one for `voxel`.
+  variants: [path, voxel, onestep, noanat, mlp, fodrefine]   # allowed: path, voxel, onestep, noanat, wmseeds, mlp,
+                            # fodrefine. path and voxel are required for H3. One training run each (times
+                            # len(train_seeds) for path and voxel). fodrefine also needs a classical CSD fit of every
+                            # training protocol on the training subjects (notebook 02).
+  max_train_hours: null     # null = every run trains all epochs, so all networks see the same number of steps.
+                            # A number (hours) ends a run early at that wall-clock time; then runs with slower
+                            # steps (path loss) get fewer steps than the others, so keep null for reported results.
+  epochs: 60                # training length = epochs * steps_per_epoch = 30,000 steps per run. The learning rate
+                            # decays to zero over this length and the path curriculum fills its first half.
+                            # Raise if the validation curves in notebook 05 are still falling at the end;
+                            # time is linear in it. Changing it needs retraining (delete outputs/models/).
+  steps_per_epoch: 500      # validation and one log row (with hours so far) per epoch.
+  batch_size: auto          # auto or an integer. auto tries 8, 16, 32, 64 and keeps the largest under 70% of GPU
+                            # memory; on CPU/MPS auto means 2. Larger = more memory and time per step. Use one
+                            # value for all runs.
+  patch: 48                 # cubic training patch (voxels at 1.25 mm). Multiple of 2^(levels-1) (4 for 3 levels);
+                            # volumes smaller than this are padded. Keep >= 40: the 40-step path covers 25 mm = 20 voxels.
+                            # Larger = more context, more GPU memory and time.
+  base_channels: 48         # U-Net width; multiple of 8 (GroupNorm with 8 groups, else 4). Memory/time grow about quadratically.
+  seeds_per_vertex: 10      # tractography seeds per V1-V3 white-surface vertex (about 2,000 vertices per subject on
+                            # the HCP mesh). Tracking time linear; more = more stable scores. Cached.
+  n_null: 100               # distance-matched surrogates per streamline. Memory/time linear; below about 20 the null
+                            # median is noisy.
+  n_jobs: -2                # CPU workers; negative counts back from all cores (-1 = all, -2 = all but one).
+  keep_raw: true            # false = delete the raw HCP diffusion folder after cropping (saves about 1.3 GB per subject;
+                            # a re-download is needed if crop settings change).
+  run_protocols: [REF, P1, P2, P3, D64, D32, D12, V20, V25]   # protocols evaluated; names from `protocols`. REF must stay.
+  train_protocols: [P1, P2, P3, D32, T7]   # network inputs during training; names from `protocols` or `extra_protocols`.
+                            # Each adds one cached input per training subject. T7 = b1000+b2000 at 1.25 mm, mimics the 7T scan.
+dev:
+  n_test: 2
+  n_train: 1
+  n_val: 1
+  n_7t: 1
+  n_retest: 1
+  n_nsd: 1
+  train_seeds: [0]
+  variants: [path, voxel, onestep, noanat, mlp, fodrefine]
+  subjects: {test: ['100610', '105923'], train: ['100206'], val: ['100307'], t7: ['105923'], retest: ['105923'], nsd: ['subj01']}
+  max_train_hours: null
+  epochs: 2
+  steps_per_epoch: 20
+  batch_size: 2
+  patch: 24
+  base_channels: 8
+  seeds_per_vertex: 1
+  n_null: 20
+  n_jobs: 4
+  keep_raw: true
+  hemis: [L]                # DEV crops the left hemisphere only
+  run_protocols: [REF, P1, P2]   # DEV runs a subset of protocols
+  train_protocols: [P1, P2]
+
+hemis: [L, R]               # [L, R] or one of them. Cached.
+
+# ---- acquisition protocols simulated from the HCP 3T data (cached) --------------------
+# shells: {b-value: number of directions}; max 90 per shell in HCP 3T, "all" keeps every direction.
+# voxel: isotropic voxel size in mm, >= 1.25 (the native size). snr: optional Rician noise at this b=0 white-matter SNR.
+protocols:
+  REF: {shells: {1000: all, 2000: all, 3000: all}, voxel: 1.25}
+  P1:  {shells: {3000: 64}, voxel: 1.5}                 # matches the NSD b=3000 shell
+  P2:  {shells: {1000: 32}, voxel: 2.0}
+  P3:  {shells: {1000: 20}, voxel: 2.5, snr: 15}
+  D64: {shells: {1000: 64}, voxel: 1.25}                # one-factor sweeps
+  D32: {shells: {1000: 32}, voxel: 1.25}
+  D12: {shells: {1000: 12}, voxel: 1.25}
+  V20: {shells: {1000: all, 2000: all, 3000: all}, voxel: 2.0}
+  V25: {shells: {1000: all, 2000: all, 3000: all}, voxel: 2.5}
+clinical_protocols: [P1, P2, P3]     # confirmatory tests; learned methods run only here. Must be a subset of run_protocols.
+extra_protocols:                     # protocols used only for training (merged into `protocols` at load)
+  T7: {shells: {1000: 64, 2000: 64}, voxel: 1.25}
+n_b0: 3                     # b=0 volumes kept per simulated protocol; HCP 3T has 18, so max 18. Cached.
+
+# ---- geometry (cached) ---------------------------------------------------------------
+crop_margin_mm: 12          # margin (mm) of the box around V1-V3 surface vertices. Smaller cuts long streamlines;
+                            # larger costs memory and time roughly cubically.
+ref_voxel: 1.25             # HCP 3T native voxel size (mm). Leave at 1.25; changing it invalidates the design.
+sh_order_out: 8             # fODF SH order, even; 8 gives 45 coefficients.
+sh_order_in: 4              # per-shell signal SH order fed to the network, even; 4 gives 15 coefficients per shell.
+shells_in: [1000, 2000, 3000]   # shells the network can read (missing ones are zero).
+                            # Changing sh_order_out, sh_order_in or shells_in changes the network size: retrain all networks.
+
+# ---- reference and classical models (cached) -----------------------------------------
+ref_model: msmt_csd         # msmt_csd | csd  (csd = single-shell CSD on b=3000)
+wm_mask_thr: 0.05           # fit fODFs where white-matter fraction exceeds this (0 to 1)
+rumba_iters: 200            # RUMBA-SD iterations; time linear.
+
+# ---- tractography (particle filtering with the continuous map criterion); cached --
+# The comparison tracker (method suffix +prob, plain probabilistic tracking) uses the same step, angle, lengths and seeds.
+tracking:
+  step_mm: 0.5              # step size (mm); smaller = slower, smoother streamlines
+  max_angle: 20             # maximum turning angle per step (degrees)
+  seed_depth_mm: 1.0        # seeds sit this far below the white surface (mm)
+  seed_jitter_mm: 0.3       # Gaussian jitter of seed positions (mm)
+  max_len_mm: 120           # streamlines longer than this are stopped (mm)
+  min_len_mm: 3             # shorter streamlines are discarded (mm)
+  pft_back_mm: 2.0          # particle-filter back-tracking distance (mm)
+  pft_front_mm: 1.0         # particle-filter front-tracking distance (mm)
+  particles: 15             # particles per particle-filter step; more = slower
+  endpoint_tol_mm: 2.5      # a streamline end must be this close to a white-surface vertex (mm). Larger = more
+                            # streamlines accepted, less precise endpoints.
+
+# ---- retinotopic reference (no cache clear needed) -----------------------------------
+prf:
+  r2_min: 10                # minimum pRF variance explained, percent (0 to 100)
+  ecc_min: 0.5              # degrees
+  ecc_max: 7.0              # degrees; HCP stimulus radius was 8, so max 8
+  null_tol: 0.10            # surrogate endpoint distance within +-this fraction of the real one
+  null_tol_min_mm: 1.0      # lower bound on that tolerance (mm)
+  n_ecc_bins: 6             # eccentricity bins of the binned eccentricity-matrix score
+
+# ---- network and loss (changes need retraining, not a cache clear) --------------------
+model:
+  levels: 3                 # U-Net resolution levels; patch must be a multiple of 2^(levels-1)
+  lr: 2.0e-4                # AdamW learning rate (times the number of DDP processes), cosine decay
+  weight_decay: 1.0e-4
+  lambda_nonneg: 0.1        # weight of the negative-amplitude penalty
+  lambda_path: 1.0          # weight of the path-consistency loss; 0 = voxel loss only
+  path:
+    seeds_per_patch: 64     # path seeds per training patch
+    steps_start: 4          # curriculum: path length (steps) grows from steps_start to steps_end
+    steps_end: 40           # over the first half of training
+    step_mm: 0.625          # path step length (mm)
+    cone_deg: 45            # directions considered at each step: within this angle of the previous one (degrees)
+    sharpen: 4.0            # exponent on normalised amplitudes; higher = closer to a hard arg-max, less smooth gradients
+    one_step: false         # ablation: direction loss along reference paths, no accumulation
+  seed_where: cortex        # cortex | wm (ablation: path seeds anywhere in white matter)
+  use_anat: true            # ablation: anatomical input channels
+  input: signal             # signal | fodf. fodf = the network reads the classical CSD fODF instead of the diffusion
+                            # signal; set by the fodrefine variant, leave as signal here
+  amp: true                 # mixed precision (CUDA only)
+  compile: false            # torch.compile the network before training
+  ckpt_minutes: 15          # checkpoint interval during training (minutes)
+
+# ---- NSD external test (real 3T scans; stimulus radius 4.2 degrees; dense native surfaces) ----
+nsd:
+  ecc_max: 4.2              # NSD stimulus radius (degrees); do not raise
+  seeds_per_vertex: 1       # NSD native surfaces have about 10,000 V1-V3 vertices per hemisphere
+  use_run2: true            # also process each subject's second diffusion run (run-to-run reproducibility; +4 GB each)
+  flip_x: true              # b-vector x sign flip, required for NSD's file orientation. Leave true.
+
+# ---- statistics (no cache clear needed) -------------------------------------------------
+stats:
+  alpha: 0.05               # significance level
+  n_boot: 10000             # bootstrap resamples for confidence intervals; time linear
+  acc_margin: 0.02          # non-inferiority margin for voxel accuracy (angular correlation) in H3
+
+# ---- cluster (optional) -----------------------------------------------------------------
+multi_gpu: jobs             # several GPUs on one machine: jobs = one training run per GPU; ddp = every run uses all GPUs
+nodes: []                   # SSH host names, e.g. [spark1, spark2]; empty = this machine only. Needs passwordless SSH
+                            # and the project folder at the same path on every node.
