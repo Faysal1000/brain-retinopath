@@ -8,7 +8,7 @@ training batches are drawn, the training loop, running on several GPUs, and infe
 ## Task
 
 Input: one degraded scan of a training subject (any of `train_protocols`: P1, P2, P3, D32, T7) on the 1.25 mm crop
-grid ([preprocessing.md](preprocessing.md#network-input-reconsignal_sh-pipelinenet_input)). Target: the reference
+grid ([05-preprocessing.md](05-preprocessing.md#network-input-reconsignal_sh-pipelinenet_input)). Target: the reference
 fODF of the same subject (multi-shell CSD on the full data, 45 SH coefficients). The network never sees
 retinotopy, and no subject with retinotopy is used for training or validation.
 

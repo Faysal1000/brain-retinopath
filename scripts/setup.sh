@@ -35,4 +35,4 @@ x = torch.randn(1, 8, 16, 16, 16, device=dev)
 torch.nn.Conv3d(8, 8, 3).to(dev)(x).sum().backward()
 print("  3D convolution forward/backward OK on", dev)
 PY
-[ -f .env ] || echo "Next: cp .env.example .env  and add your HCP keys (docs/data.md)"
+[ -f .env ] || echo "Next: cp .env.example .env  and add your HCP keys (docs/02-data.md)"

@@ -16,13 +16,13 @@ retinotopic specificity index (RSI) compares each streamline's endpoint error wi
   voxel-wise accuracy. The decisive comparison is `path` vs `voxel`, two networks that differ only in the loss.
 
 Data: HCP Young Adult (3T, 7T, retest) and the Natural Scenes Dataset, all public. Details:
-[docs/overview.md](docs/overview.md); the README lists all documentation.
+[docs/01-overview.md](docs/01-overview.md); the README lists all documentation.
 
 ## Layout
 
 `config.yaml` holds every setting. `notebooks/00`–`09` are the experiment and call the library in
 `src/retinopath/`. `scripts/` sets up the environment, downloads data and runs the notebooks. Every file is listed
-in [docs/code.md](docs/code.md).
+in [docs/08-code.md](docs/08-code.md).
 
 ## Rules
 
@@ -79,11 +79,11 @@ it is, layout, how to run); details go in `docs/`.
 
 | Change in | Update |
 |---|---|
-| `config.yaml` keys, defaults or what needs clearing | comment in `config.yaml`, [docs/configuration.md](docs/configuration.md) |
-| `subject.py`, `nsd.py`, `atlas.py`, `degrade.py`, `recon.py` | [docs/preprocessing.md](docs/preprocessing.md) |
-| `model.py`, `train.py`, `jobs.py` | [docs/network.md](docs/network.md) |
-| `track.py`, `metrics.py`, `stats.py` | [docs/scoring.md](docs/scoring.md) |
-| `pipeline.py`, `core.py`, `download.py`, files, cache files, result columns | [docs/code.md](docs/code.md) |
-| A notebook, the hypotheses or the methods compared | [docs/overview.md](docs/overview.md) |
-| Datasets, downloaded files, terms | [docs/data.md](docs/data.md) |
-| Setup, scripts, platforms, resume behaviour | [docs/running.md](docs/running.md), README if the commands change |
+| `config.yaml` keys, defaults or what needs clearing | comment in `config.yaml`, [docs/04-configuration.md](docs/04-configuration.md) |
+| `subject.py`, `nsd.py`, `atlas.py`, `degrade.py`, `recon.py` | [docs/05-preprocessing.md](docs/05-preprocessing.md) |
+| `model.py`, `train.py`, `jobs.py` | [docs/06-network.md](docs/06-network.md) |
+| `track.py`, `metrics.py`, `stats.py` | [docs/07-scoring.md](docs/07-scoring.md) |
+| `pipeline.py`, `core.py`, `download.py`, files, cache files, result columns | [docs/08-code.md](docs/08-code.md) |
+| A notebook, the hypotheses or the methods compared | [docs/01-overview.md](docs/01-overview.md) |
+| Datasets, downloaded files, terms | [docs/02-data.md](docs/02-data.md) |
+| Setup, scripts, platforms, resume behaviour | [docs/03-running.md](docs/03-running.md), README if the commands change |

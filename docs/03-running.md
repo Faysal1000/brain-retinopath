@@ -33,7 +33,7 @@ sudo apt install -y python3.12 python3.12-venv python3.12-dev
 PYTHON=python3.12 bash scripts/setup.sh
 ```
 
-Then create `.env` with the HCP keys ([data.md](data.md)).
+Then create `.env` with the HCP keys ([02-data.md](02-data.md)).
 
 ## Download, then run
 
@@ -83,7 +83,7 @@ outputs/run_log.csv       wall-clock hours per stage
 outputs/executed/         executed notebooks
 ```
 
-The main result columns are listed in [code.md](code.md#result-columns).
+The main result columns are listed in [08-code.md](08-code.md#result-columns).
 
 ## GPUs and nodes
 
@@ -114,7 +114,7 @@ should print a `+cu130` build, `13.0` and `True`. If the build is `+cpu`:
 Another wheel index can be given with `TORCH_INDEX=<url> bash scripts/setup.sh`.
 
 **"config.yaml changed in [...]".** A cached setting was changed; delete `data/cache` (or `data/cache/dev`) or
-restore the value ([configuration.md](configuration.md)).
+restore the value ([04-configuration.md](04-configuration.md)).
 
 **HCP download fails with an access error.** Check the two keys in `.env`; they are tied to the account that
 accepted the HCP terms.

@@ -182,7 +182,7 @@ networks therefore use only the b = 3000 shell of NSD.
 | `rumba` | RUMBA-SD |
 | `csd_mppca` | MP-PCA denoising of the protocol (DIPY `mppca`, patch radius 2), then `csd` |
 | `csd_interp` | Diffusion images interpolated to the 1.25 mm crop grid first, then `csd` |
-| `net_<variant>_s<seed>` | Network output, written by `train.net_fodf` ([network.md](network.md)) |
+| `net_<variant>_s<seed>` | Network output, written by `train.net_fodf` ([06-network.md](06-network.md)) |
 
 **Single-shell CSD** (`fit_csd`, Tournier et al. 2007). The highest-b shell and the b=0 volumes. The response is
 axially symmetric: axial diffusivity = mean first tensor eigenvalue of the single-fibre voxels, radial = mean of

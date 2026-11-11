@@ -48,7 +48,7 @@ stimulus was smaller).
 |---|---|---|
 | Measured | The subject's own pRF fit, all runs | `rsi_*`, `ree_*`, … |
 | Group average | HCP group-average pRF maps (ID 999999) on the subject's vertices (`pipeline.group_key_source`) | `template_rsi_ree_*` |
-| Atlas | Benson et al. 2014 atlas ([preprocessing.md](preprocessing.md#atlas-key-atlaspy)) | `atlas_rsi_ree_*` |
+| Atlas | Benson et al. 2014 atlas ([05-preprocessing.md](05-preprocessing.md#atlas-key-atlaspy)) | `atlas_rsi_ree_*` |
 
 For HCP subjects the group average includes the subject; for NSD it is an independent group. The split-half fits
 (`fit=1`, `fit=2`) are used for the noise ceiling and the robustness analysis.
@@ -108,7 +108,7 @@ identifiers, tractogram counts, the measured-key scores, the noise ceiling, the 
 number of valid streamlines, and the comparison with the reference. The row is cached as
 `scores_<protocol>_<method>_<hash>.json`. The hash covers the settings that change scores but not tractograms:
 `prf`, `n_null`, `seed`, the reference, and which keys and nulls were used. Changing them recomputes scores from
-the cached tractograms. Column names are listed in [code.md](code.md#result-columns).
+the cached tractograms. Column names are listed in [08-code.md](08-code.md#result-columns).
 
 ## Statistics (`stats.py`, notebook 09)
 

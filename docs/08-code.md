@@ -7,7 +7,7 @@ file the code writes.
 
 | File | Purpose |
 |---|---|
-| `config.yaml` | Every path and setting, commented in place ([configuration.md](configuration.md)) |
+| `config.yaml` | Every path and setting, commented in place ([04-configuration.md](04-configuration.md)) |
 | `notebooks/00`–`09` | The experiment (below) |
 | `scripts/setup.sh` | Creates `.venv` (Python 3.12–3.13), installs the pinned packages (CUDA 13 PyTorch on Linux), installs the package, registers the `retinopath` Jupyter kernel, runs a 3D convolution on the device |
 | `scripts/download_data.sh` | `python -m retinopath.pipeline` for `full` or `dev`; `WORKERS` sets the number of parallel downloads |
@@ -82,7 +82,7 @@ together otherwise.
 | `osf_download` | `prfresults.mat` and `atlas.mat` from OSF |
 | `update_manifest` | Size and ETag of every downloaded file in `data/manifest.json` |
 
-### `subject.py`: HCP crop ([preprocessing.md](preprocessing.md#hcp-crop-subjectbuild_anat-subjectload_dwi_crop))
+### `subject.py`: HCP crop ([05-preprocessing.md](05-preprocessing.md#hcp-crop-subjectbuild_anat-subjectload_dwi_crop))
 
 | Name | Does |
 |---|---|
@@ -96,7 +96,7 @@ together otherwise.
 | `build_anat` | The `anat` dictionary of an HCP session |
 | `load_dwi_crop` | Cropped diffusion, b-values, b-vectors, mask |
 
-### `nsd.py`: NSD crop ([preprocessing.md](preprocessing.md#nsd-crop-nsdbuild_anat-nsdload_dwi_crop))
+### `nsd.py`: NSD crop ([05-preprocessing.md](05-preprocessing.md#nsd-crop-nsdbuild_anat-nsdload_dwi_crop))
 
 | Name | Does |
 |---|---|
@@ -105,7 +105,7 @@ together otherwise.
 | `template_prf` | HCP group-average pRF on an NSD subject's vertices |
 | `build_anat`, `load_dwi_crop` | Same outputs as `subject.py` |
 
-### `atlas.py`: atlas key ([preprocessing.md](preprocessing.md#atlas-key-atlaspy))
+### `atlas.py`: atlas key ([05-preprocessing.md](05-preprocessing.md#atlas-key-atlaspy))
 
 | Name | Does |
 |---|---|
@@ -113,7 +113,7 @@ together otherwise.
 | `fsaverage_maps` | Atlas on fsaverage with polar angle in the pRF convention |
 | `atlas_key_source` | Atlas values at a session's vertices, in the layout of the measured maps |
 
-### `degrade.py`: protocol simulation ([preprocessing.md](preprocessing.md#protocol-simulation-degrademake_protocol))
+### `degrade.py`: protocol simulation ([05-preprocessing.md](05-preprocessing.md#protocol-simulation-degrademake_protocol))
 
 | Name | Does |
 |---|---|
@@ -124,7 +124,7 @@ together otherwise.
 | `add_rician` | Rician noise at a given white-matter b=0 SNR |
 | `make_protocol` | One simulated protocol: volumes, voxel size, noise |
 
-### `recon.py`: spherical harmonics and fODFs ([preprocessing.md](preprocessing.md#classical-fodfs-reconpy-pipelinefodf))
+### `recon.py`: spherical harmonics and fODFs ([05-preprocessing.md](05-preprocessing.md#classical-fodfs-reconpy-pipelinefodf))
 
 | Name | Does |
 |---|---|
@@ -139,7 +139,7 @@ together otherwise.
 | `pad_order` | Zero-pads a lower-order SH volume |
 | `fit_fodf` | Chooses the fit for a method and pads to `sh_order_out` |
 
-### `model.py`: networks and the path loss ([network.md](network.md))
+### `model.py`: networks and the path loss ([06-network.md](06-network.md))
 
 | Name | Does |
 |---|---|
@@ -153,7 +153,7 @@ together otherwise.
 | `path_loss` | Path-consistency loss (or the `onestep` direction loss) |
 | `nonneg_loss` | Penalty on negative fODF amplitudes |
 
-### `train.py`: training and inference ([network.md](network.md))
+### `train.py`: training and inference ([06-network.md](06-network.md))
 
 | Name | Does |
 |---|---|
@@ -168,7 +168,7 @@ together otherwise.
 | `clear_outputs` | Removes cached outputs of an earlier network with the same name |
 | `load_trained`, `net_fodf`, `trained_runs` | Load a trained network, write its fODF for a session, list finished runs |
 
-### `jobs.py`: running training runs ([network.md](network.md#running-training-runs-jobspy))
+### `jobs.py`: running training runs ([06-network.md](06-network.md#running-training-runs-jobspy))
 
 | Name | Does |
 |---|---|
@@ -176,7 +176,7 @@ together otherwise.
 | `train_commands` | One command per training run in `config.yaml` |
 | `run_jobs` | Runs the commands over all GPUs and nodes; forwards an interrupt to every local run |
 
-### `track.py`: tractography ([scoring.md](scoring.md#tractography-trackpy-pipelinetract))
+### `track.py`: tractography ([07-scoring.md](07-scoring.md#tractography-trackpy-pipelinetract))
 
 | Name | Does |
 |---|---|
@@ -186,7 +186,7 @@ together otherwise.
 | `area_pairs` | Streamlines between two different areas of V1–V3 |
 | `density_map` | Streamlines per voxel |
 
-### `metrics.py`: scores ([scoring.md](scoring.md))
+### `metrics.py`: scores ([07-scoring.md](07-scoring.md))
 
 | Name | Does |
 |---|---|
@@ -221,7 +221,7 @@ together otherwise.
 | `run_grid` | Scores for sessions × (protocol, method), saved as a CSV |
 | `download_all` | Every file a configuration needs (also `python -m retinopath.pipeline [--dev] [--workers N] [--list]`) |
 
-### `stats.py`: statistics ([scoring.md](scoring.md#statistics-statspy-notebook-09))
+### `stats.py`: statistics ([07-scoring.md](07-scoring.md#statistics-statspy-notebook-09))
 
 `hodges_lehmann`, `rank_biserial`, `bootstrap_ci`, `paired_test`, `correct`, `mixed_model`.
 
@@ -355,7 +355,7 @@ ETag.
 | Path | Contents |
 |---|---|
 | `subjects.json` | `test`, `train`, `val`, `t7`, `retest`, `nsd` |
-| `models/<run>/last.pt` | Checkpoint ([network.md](network.md#training-loop-traintrain)) |
+| `models/<run>/last.pt` | Checkpoint ([06-network.md](06-network.md#training-loop-traintrain)) |
 | `models/<run>/log.json` | One row per epoch (below) |
 | `models/<run>/pid` | Host and process ID of the process training the run |
 | `logs/<run>.log` | Console output of a training run |

@@ -5,7 +5,7 @@ of the visual field. High-quality diffusion MRI can show this organisation; clin
 This repository tests whether a network that enhances fibre orientation estimates from clinical-grade scans can
 bring it back, and measures the answer against each person's own measured retinotopy.
 
-The code name is `retinopath`. Background, method and design are in [docs/overview.md](docs/overview.md).
+The code name is `retinopath`. Background, method and design are in [docs/01-overview.md](docs/01-overview.md).
 
 ## Layout
 
@@ -28,7 +28,7 @@ one hemisphere, short training).
 bash scripts/setup.sh
 ```
 ```bash
-cp .env.example .env    # then add your HCP keys, see docs/data.md
+cp .env.example .env    # then add your HCP keys, see docs/02-data.md
 ```
 ```bash
 bash scripts/download_data.sh dev
@@ -43,13 +43,13 @@ bash scripts/run_all.sh dev
 sudo apt update && sudo apt install -y python3 python3-venv python3-pip python3-dev git tmux
 ```
 ```bash
-git clone <repository-url> retinopath && cd retinopath
+git clone https://github.com/Faysal1000/brain-retinopath.git retinopath && cd retinopath
 ```
 ```bash
 bash scripts/setup.sh
 ```
 ```bash
-cp .env.example .env    # then add your HCP keys, see docs/data.md
+cp .env.example .env    # then add your HCP keys, see docs/02-data.md
 ```
 ```bash
 bash scripts/download_data.sh
@@ -64,18 +64,20 @@ opened in Jupyter with the `retinopath` kernel and run by hand (`DEV_MODE` is se
 
 ## Documentation
 
-- [docs/overview.md](docs/overview.md): the question, what we do, hypotheses, pipeline and network diagrams, notebooks
-- [docs/data.md](docs/data.md): datasets, access, download, terms of use
-- [docs/preprocessing.md](docs/preprocessing.md): crops, tissue maps, retinotopy, protocol simulation, network inputs, classical fODFs
-- [docs/network.md](docs/network.md): architectures, path-consistency loss, variants, training
-- [docs/scoring.md](docs/scoring.md): tractography, retinotopic scores, statistics
-- [docs/code.md](docs/code.md): files, modules, cached steps, outputs
-- [docs/configuration.md](docs/configuration.md): settings and what changing them costs
-- [docs/running.md](docs/running.md): setup, stopping and resuming, GPUs, troubleshooting
+Read the pages in order; each builds on the ones before it.
+
+1. [Overview](docs/01-overview.md): the question, what we do, hypotheses, pipeline and network diagrams, notebooks
+2. [Data](docs/02-data.md): datasets, access, download, terms of use
+3. [Running](docs/03-running.md): setup, stopping and resuming, GPUs, troubleshooting
+4. [Configuration](docs/04-configuration.md): settings and what changing them costs
+5. [Preprocessing](docs/05-preprocessing.md): crops, tissue maps, retinotopy, protocol simulation, network inputs, classical fODFs
+6. [Network](docs/06-network.md): architectures, path-consistency loss, variants, training
+7. [Scoring](docs/07-scoring.md): tractography, retinotopic scores, statistics
+8. [Code](docs/08-code.md): files, modules, cached steps, outputs, file formats
 
 Rules for changing the code are in [AGENTS.md](AGENTS.md).
 
 ## Data terms
 
 The Human Connectome Project and Natural Scenes Dataset data are not redistributed here and must not be committed.
-See [docs/data.md](docs/data.md) for the terms and the required acknowledgements.
+See [docs/02-data.md](docs/02-data.md) for the terms and the required acknowledgements.

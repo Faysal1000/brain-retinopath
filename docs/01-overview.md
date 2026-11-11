@@ -111,5 +111,5 @@ dataset would have.
 | `08_ablations_robustness` | Other analysis choices, ablations | `robustness.csv` |
 | `09_stats_figures_tables` | Tests, summary tables, figures | `*_tests.csv`, `*_results.csv`, `outputs/figures/` |
 
-Details: [preprocessing.md](preprocessing.md), [network.md](network.md), [scoring.md](scoring.md),
-[code.md](code.md).
+Details: [05-preprocessing.md](05-preprocessing.md), [06-network.md](06-network.md), [07-scoring.md](07-scoring.md),
+[08-code.md](08-code.md).
