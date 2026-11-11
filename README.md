@@ -58,7 +58,7 @@ bash scripts/download_data.sh
 bash scripts/run_all.sh full
 ```
 
-`run_all.sh` executes the ten notebooks in order and saves executed copies to `outputs/executed/`. It can be
+`run_all.sh` executes the eleven notebooks in order and saves executed copies to `outputs/executed/`. It can be
 stopped at any time; running the same command again continues from where it stopped. The notebooks can also be
 opened in Jupyter with the `retinopath` kernel and run by hand (`DEV_MODE` is set in the first cell).
 

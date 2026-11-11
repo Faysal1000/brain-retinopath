@@ -142,6 +142,8 @@ test.
 
 ### Other tests
 
+- **Pairwise comparisons** (`pairwise_tests.csv`, FDR). RSI of every pair of methods on each clinical-grade protocol,
+  two-sided, networks averaged over seeds; FDR over all pairs of all protocols. Drawn as supplementary figure S4.
 - **Exploratory grid** (`exploratory_tests.csv`, FDR). Every method on every protocol against classical CSD on the
   same protocol, two-sided; networks are one method per variant (seeds averaged).
 - **Mixed model** (`mixed_model.csv`). On the clinical-grade protocols and the methods that were run on all of

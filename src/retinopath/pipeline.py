@@ -13,7 +13,7 @@ from . import metrics as M, nsd
 from .atlas import atlas_files, atlas_key_source
 from .core import atomic, load_json, n_jobs, save_json
 from .degrade import make_protocol, to_grid
-from .download import HCP_BUCKET, anon_client, hcp_client, hcp_download, osf_download, s3_dirs, s3_exists, update_manifest
+from .download import HCP_BUCKET, anon_client, hcp_client, hcp_download, hcp_figure_keys, osf_download, s3_dirs, s3_exists, s3_get, update_manifest
 from .recon import fit_fodf, signal_sh
 from .subject import build_anat, load_dwi_crop, load_prf, prf_subject_ids, subject_dir
 from .track import area_pairs, density_map, endpoints, make_seeds, run_tracking
@@ -345,6 +345,9 @@ def download_all(cfg, workers=8, list_only=False):
     get = lambda j: hcp_download(cfg, j[1], j[2], j[3], s3) if j[0] == "hcp" else nsd.nsd_download(cfg, j[1], j[2], pub)
     with ThreadPoolExecutor(workers) as ex:
         rows = [r for rs in tqdm(ex.map(get, jobs), total=len(jobs), desc="download") for r in rs]
+        # inflated surfaces of the test subjects for the figures (notebook 10); fetched even when a scan is cropped
+        keys = [k for s in subjects["test"] for k in hcp_figure_keys(s)]
+        rows += list(ex.map(lambda k: s3_get(s3, HCP_BUCKET, k, cfg.P.hcp / k), keys))
     man = update_manifest(cfg, rows)
     print(len(man), "files in data/manifest.json,", round(sum(v["bytes"] for v in man.values()) / 1e9, 1), "GB", flush=True)
     return rows

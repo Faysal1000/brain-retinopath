@@ -81,6 +81,11 @@ def hcp_keys(sid, kind="3T", release="HCP_1200"):
     return keys
 
 
+def hcp_figure_keys(sid, release="HCP_1200"):
+    """Very inflated surfaces of both hemispheres (same vertices and faces as the white surface); figures only."""
+    return [f"{release}/{sid}/T1w/fsaverage_LR32k/{sid}.{h}.very_inflated_MSMAll.32k_fs_LR.surf.gii" for h in "LR"]
+
+
 def hcp_download(cfg, sid, kind="3T", release="HCP_1200", s3=None):
     s3 = s3 or hcp_client(cfg)
     return [s3_get(s3, HCP_BUCKET, k, cfg.P.hcp / k) for k in hcp_keys(sid, kind, release)]

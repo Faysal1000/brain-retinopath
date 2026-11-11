@@ -76,6 +76,13 @@ def load_surfaces(cfg, sid, release="HCP_1200", hemis="LR"):
     return out
 
 
+def inflated_surface(cfg, sid, h, release="HCP_1200"):
+    """Very inflated surface of one hemisphere (mm), vertex for vertex the same mesh as the white surface; for figures.
+    None if it was not downloaded (pipeline.download_all fetches it for the test subjects)."""
+    f = subject_dir(cfg, sid, release) / "fsaverage_LR32k" / f"{sid}.{h}.very_inflated_MSMAll.32k_fs_LR.surf.gii"
+    return nib.load(f).darrays[0].data.astype(np.float32) if f.exists() else None
+
+
 def crop_box(verts_world, affine, shape, margin_mm):
     """Voxel bounding box (start, stop) around a set of world points."""
     ijk = nib.affines.apply_affine(np.linalg.inv(affine), verts_world)

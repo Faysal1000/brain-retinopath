@@ -109,7 +109,8 @@ dataset would have.
 | `06_inference_eval` | Networks on the clinical-grade protocols (H2, H3) | `learned.csv` |
 | `07_external_tests` | HCP 7T, HCP retest, NSD | `external_*.csv`, `retest_*.csv`, `nsd_run_overlap.csv` |
 | `08_ablations_robustness` | Other analysis choices, ablations | `robustness.csv` |
-| `09_stats_figures_tables` | Tests, summary tables, figures | `*_tests.csv`, `*_results.csv`, `outputs/figures/` |
+| `09_stats_figures_tables` | Tests, pairwise comparisons, summary tables | `*_tests.csv`, `*_results.csv` |
+| `10_figures` | Paper figures, from saved files only | `outputs/figures/fig*.pdf`, `.png` |
 
 Details: [05-preprocessing.md](05-preprocessing.md), [06-network.md](06-network.md), [07-scoring.md](07-scoring.md),
 [08-code.md](08-code.md).

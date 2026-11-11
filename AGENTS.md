@@ -20,7 +20,7 @@ Data: HCP Young Adult (3T, 7T, retest) and the Natural Scenes Dataset, all publi
 
 ## Layout
 
-`config.yaml` holds every setting. `notebooks/00`–`09` are the experiment and call the library in
+`config.yaml` holds every setting. `notebooks/00`–`10` are the experiment and call the library in
 `src/retinopath/`. `scripts/` sets up the environment, downloads data and runs the notebooks. Every file is listed
 in [docs/08-code.md](docs/08-code.md).
 
@@ -68,7 +68,7 @@ in [docs/08-code.md](docs/08-code.md).
 bash scripts/run_all.sh dev
 ```
 
-runs all ten notebooks on the `dev:` subjects (a few minutes of training; its outputs in `outputs/dev/` are not
+runs all eleven notebooks on the `dev:` subjects (a few minutes of training; its outputs in `outputs/dev/` are not
 results). A single notebook: `bash scripts/run_notebook.sh 03_retinotopy_metric`. A cached step that should be
 redone needs its file deleted from `data/cache/dev/<session>/`. Never run the full configuration on a laptop.
 

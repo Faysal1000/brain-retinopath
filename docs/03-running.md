@@ -39,7 +39,7 @@ Then create `.env` with the HCP keys ([02-data.md](02-data.md)).
 
 ```bash
 bash scripts/download_data.sh [dev]      # all data for the chosen configuration
-bash scripts/run_all.sh dev|full         # notebooks 00 to 09 in order
+bash scripts/run_all.sh dev|full         # notebooks 00 to 10 in order
 ```
 
 `run_all.sh` copies each notebook to `outputs/executed/`, sets `DEV_MODE` there and executes it, so the notebooks

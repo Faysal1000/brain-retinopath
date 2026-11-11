@@ -8,10 +8,10 @@ file the code writes.
 | File | Purpose |
 |---|---|
 | `config.yaml` | Every path and setting, commented in place ([04-configuration.md](04-configuration.md)) |
-| `notebooks/00`–`09` | The experiment (below) |
+| `notebooks/00`–`10` | The experiment (below) |
 | `scripts/setup.sh` | Creates `.venv` (Python 3.12–3.13), installs the pinned packages (CUDA 13 PyTorch on Linux), installs the package, registers the `retinopath` Jupyter kernel, runs a 3D convolution on the device |
 | `scripts/download_data.sh` | `python -m retinopath.pipeline` for `full` or `dev`; `WORKERS` sets the number of parallel downloads |
-| `scripts/run_all.sh` | Runs notebooks 00–09 in order. Each is copied to `outputs/executed/` with `DEV_MODE` set and executed there, so `notebooks/` stays clean |
+| `scripts/run_all.sh` | Runs notebooks 00–10 in order. Each is copied to `outputs/executed/` with `DEV_MODE` set and executed there, so `notebooks/` stays clean |
 | `scripts/run_notebook.sh` | Executes one notebook in place, with the `DEV_MODE` saved in it |
 | `requirements.txt` | Pinned packages for macOS, including PyTorch |
 | `requirements-dgx.txt` | The same pins for Linux with CUDA; PyTorch comes from the CUDA 13 wheel index |
@@ -79,6 +79,7 @@ together otherwise.
 | `s3_dirs` | Sub-folder names under a prefix (all pages) |
 | `s3_exists` | False only for a missing object; wrong keys or network errors raise |
 | `hcp_keys`, `hcp_download` | The files of one HCP session: 3T = diffusion, mask, `aparc+aseg`, white and pial MSMAll surfaces; 7T = the diffusion files |
+| `hcp_figure_keys` | Very inflated MSMAll surfaces of both hemispheres (figures only) |
 | `osf_download` | `prfresults.mat` and `atlas.mat` from OSF |
 | `update_manifest` | Size and ETag of every downloaded file in `data/manifest.json` |
 
@@ -91,6 +92,7 @@ together otherwise.
 | `load_prf` | pRF maps on the fsLR 32k mesh, three fits per vertex |
 | `load_wang` | V1–V3 labels and dorsal flag from `atlas.mat` |
 | `load_surfaces` | White-surface vertices, faces, outward normals |
+| `inflated_surface` | Very inflated surface of one hemisphere, the same mesh as the white surface; `None` if not downloaded (figures only) |
 | `crop_box`, `shifted_affine` | Box around a set of points; affine moved to the box origin |
 | `tissue_maps` | Tissue fractions and signed distance on the crop grid |
 | `build_anat` | The `anat` dictionary of an HCP session |
@@ -276,12 +278,14 @@ validation subjects exist than requested.
 
 Fetches the retinotopy files, builds the subject lists, then downloads every session of the configuration whose
 crop is not cached yet, in parallel threads: HCP 3T for test, training, validation and retest subjects, HCP 7T for
-`t7`, HCP retest, and both NSD runs. It also fetches the sphere and atlas files and updates the manifest.
+`t7`, HCP retest, and both NSD runs. It also fetches the sphere and atlas files and the very inflated surfaces of
+the test subjects (for Figure 1; fetched even when their crop is cached, so a cache made earlier gets them too), and
+updates the manifest.
 `--list` only builds the lists and counts the sessions.
 
 ## Notebooks
 
-Each starts with the same cell: `DEV_MODE`, imports, `cfg = load_config(DEV_MODE)`, the device, seeding, and the
+Each starts with the same cell (notebook 10 a shorter one without device and seeding): `DEV_MODE`, imports, `cfg = load_config(DEV_MODE)`, the device, seeding, and the
 `results/` and `figures/` folders of the output directory. Every stage runs inside a `Timer`. All work goes
 through the cached steps above.
 
@@ -296,9 +300,16 @@ through the cached steps above.
 | `06_inference_eval` | Every finished network on the clinical-grade protocols of every test subject; tracking and scores | `learned.csv` |
 | `07_external_tests` | HCP 7T: CSD and the `path`, `voxel`, `mlp`, `fodrefine` networks on the 7T scans. HCP retest: reference pipeline on the retest scans and test–retest agreement. NSD: crop, the same networks, CSD, `csd+prob` and proximity on run 1; CSD on run 2 and run-to-run agreement. No reference comparison (`ref=None`) | `external_7t.csv`, `retest_rsi.csv`, `retest_overlap.csv`, `external_nsd.csv`, `external_nsd_run2.csv`, `nsd_run_overlap.csv` |
 | `08_ablations_robustness` | Re-scores the reference tractograms with r² ≥ 5% and ≥ 20%, null tolerance 5% and 20%, eccentricity ≤ 5° and ≥ 1°, each pRF half, and dorsal, ventral, left and right subsets (more than 50 streamlines); ablation networks per variant and protocol | `robustness.csv` |
-| `09_stats_figures_tables` | Confirmatory and exploratory tests, mixed model, other keys, summary tables (median [IQR]), external comparisons, ACC against RSI figure, hours logged | `confirmatory_tests.csv`, `exploratory_tests.csv`, `mixed_model.csv`, `alternative_key_tests.csv`, `main_results.csv`, `external_results.csv`, `external_tests.csv`, `reproducibility.csv`, `accuracy_vs_fidelity.png` |
+| `09_stats_figures_tables` | Confirmatory and exploratory tests, pairwise comparisons of all methods, mixed model, other keys, summary tables (median [IQR]), external comparisons, hours logged | `confirmatory_tests.csv`, `exploratory_tests.csv`, `pairwise_tests.csv`, `mixed_model.csv`, `alternative_key_tests.csv`, `main_results.csv`, `external_results.csv`, `external_tests.csv`, `reproducibility.csv` |
+| `10_figures` | Paper figures, drawn only from cached anatomy and tractograms and the result tables; never tracks, trains or scores, so it can be re-run to restyle. Fig. 1: visual areas of the first test subject on the whole very inflated hemisphere (medial view), polar angle and eccentricity enlarged on V1–V3, and its reference streamlines on the white surface (medial-posterior view); without the inflated file panels a–c use the white surface. Fig. 2 (H1): like-to-like matrices of the reference tractogram (below) for eccentricity and polar angle, ratio by bin distance against the proximity bound, RSI per pair. Fig. 3: the V1–V2 streamlines of the same subject for reference, CSD, `voxel` and `path` on the first clinical protocol, coloured by V1-end eccentricity and by endpoint error, with that subject's RSI. Fig. 4 (H3): V1–V2 matrices of the same four; paired RSI per protocol; ACC against RSI for every method. Fig. 5 (H2): recovery of ACC against recovery of RSI, as in the H2 test. Fig. 6: HCP 7T, NSD, reproducibility. S1: every method; S2: robustness; S3: other keys; S4: FDR p-values of all pairwise comparisons | `fig1_*` … `fig6_*`, `figS1_*` … `figS4_*` (PDF and PNG, 300 dpi) |
 
 Result tables are written to `outputs/results/`, figures to `outputs/figures/` (`outputs/dev/…` in dev mode).
+
+**Like-to-like matrices (notebook 10).** For one area pair, both ends of each streamline are binned by a
+retinotopic coordinate (eccentricity or polar angle) at quantiles of the subject's valid V1 values
+(`prf.n_ecc_bins` bins, as in the binned AUC). Counts are summed over test subjects and training seeds and divided
+by the counts independent ends would give (row total × column total / total), shown on a log scale from ½× to 2×.
+The ratio removes uneven coverage but not distance; the distance-matched RSI is the controlled measure.
 
 ## File formats
 
@@ -360,7 +371,7 @@ ETag.
 | `models/<run>/pid` | Host and process ID of the process training the run |
 | `logs/<run>.log` | Console output of a training run |
 | `results/*.csv` | Result tables |
-| `figures/*.png` | Figures |
+| `figures/*.png`, `figures/*.pdf` | Figures; `fig*` are the paper figures (notebook 10) |
 | `run_log.csv` | `stage, hours, finished, ok` per notebook stage |
 | `executed/*.ipynb` | Notebooks executed by `run_all.sh`, with outputs |
 

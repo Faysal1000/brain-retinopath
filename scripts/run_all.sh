@@ -10,7 +10,7 @@ case "${1:-}" in
   *) echo "usage: bash scripts/run_all.sh dev|full"; exit 1 ;;
 esac
 mkdir -p outputs/executed
-for nb in notebooks/0*.ipynb; do
+for nb in notebooks/[0-9][0-9]_*.ipynb; do
   name=$(basename "$nb" .ipynb)
   echo "=== $name  ($(date '+%F %T'))"
   # set the DEV_MODE flag for this run in a copy; the notebooks in notebooks/ are not modified

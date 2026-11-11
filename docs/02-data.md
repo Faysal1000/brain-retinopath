@@ -31,7 +31,8 @@ skipped, so it can be stopped and started again. Sizes: about 1.4 GB per HCP 3T 
 ## Files read
 
 - **HCP** (`HCP_1200/<id>/T1w/`, `HCP_Retest/`): `Diffusion/` or `Diffusion_7T/` (`data.nii.gz`, `bvals`, `bvecs`,
-  `nodif_brain_mask.nii.gz`), `aparc+aseg.nii.gz`, white and pial `*_MSMAll.32k_fs_LR.surf.gii`.
+  `nodif_brain_mask.nii.gz`), `aparc+aseg.nii.gz`, white and pial `*_MSMAll.32k_fs_LR.surf.gii`; for the test
+  subjects also `very_inflated_MSMAll.32k_fs_LR.surf.gii` (about 0.7 MB per hemisphere, Figure 1 only).
 - **Retinotopy**: `prfresults.mat` (pRF maps of 181 subjects and group averages, all runs and each half) and
   `atlas.mat` (Wang 2015 visual areas).
 - **NSD**: diffusion runs 1 and 2 in the 0.8 mm space, native surfaces, `aseg_0pt8`, pRF maps, `prf-visualrois`,
