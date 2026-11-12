@@ -1,7 +1,9 @@
 """Resumable downloads: HCP (S3, needs keys in .env), HCP 7T retinotopy results (OSF, open), NSD (S3, open)."""
-import os, threading, time
+import os, shutil, threading, time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import boto3, requests
+from boto3.s3.transfer import TransferConfig
 from tqdm.auto import tqdm
 from botocore import UNSIGNED
 from botocore.exceptions import ClientError
@@ -11,8 +13,14 @@ from .core import save_json, load_json
 HCP_BUCKET = "hcp-openaccess"
 OSF_FILES = {"prfresults.mat": "https://osf.io/download/yus6t/",
              "atlas.mat": "https://osf.io/download/523df/"}
-# S3 retries read time-outs and dropped connections itself; a file restarts from zero on a retry
-S3_CONFIG = dict(retries={"max_attempts": 10, "mode": "standard"}, connect_timeout=30, read_timeout=120)
+# One connection to these servers gives 1-2 MB/s whatever the line speed, so large files are fetched as many byte
+# ranges at once. S3 retries time-outs and dropped connections itself. The connection pool is shared by all download
+# threads and must hold workers x PARTS_AT_ONCE connections, or the extra threads wait for a free one.
+PART_BYTES, PARTS_AT_ONCE = 8 << 20, 16
+S3_CONFIG = dict(retries={"max_attempts": 10, "mode": "standard"}, connect_timeout=30, read_timeout=120,
+                 max_pool_connections=512)
+S3_TRANSFER = TransferConfig(multipart_threshold=PART_BYTES, multipart_chunksize=PART_BYTES, max_concurrency=PARTS_AT_ONCE)
+RETRY = (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError)
 
 
 def read_env(path):
@@ -48,48 +56,8 @@ def s3_get(s3, bucket, key, dest, progress=None):
     if not (dest.exists() and dest.stat().st_size == size):
         # temporary name unique to this thread: two downloads of the same file must not share it
         tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{threading.get_ident()}.part")
-        s3.download_file(bucket, key, str(tmp), Callback=progress); tmp.replace(dest)
+        s3.download_file(bucket, key, str(tmp), Callback=progress, Config=S3_TRANSFER); tmp.replace(dest)
     return key, size, etag
-
-
-def s3_size(s3, bucket, key, dest):
-    """(bytes of the object, bytes still to download): 0 to download when a file of the same size is on disk."""
-    size = s3.head_object(Bucket=bucket, Key=key)["ContentLength"]
-    dest = Path(dest)
-    return size, 0 if dest.exists() and dest.stat().st_size == size else size
-
-
-def http_get(url, dest, tries=8, timeout=60):
-    """Download a URL to `dest` with a progress bar. A dropped or timed-out connection is retried (up to `tries`
-    times, waiting longer each time) and continues from the bytes already in `dest`.part when the server accepts a
-    Range request. Skipped when `dest` exists."""
-    dest = Path(dest)
-    if dest.exists():
-        return dest
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + ".part")
-    for i in range(tries):
-        have = tmp.stat().st_size if tmp.exists() else 0
-        try:
-            with requests.get(url, stream=True, timeout=timeout, headers={"Range": f"bytes={have}-"} if have else {}) as r:
-                if r.status_code == 416:                                  # .part already holds the whole file
-                    break
-                r.raise_for_status()
-                if r.status_code != 206: have = 0                         # server ignored Range: start again
-                total = int(r.headers.get("Content-Length", 0)) + have or None
-                with open(tmp, "ab" if have else "wb") as f, \
-                        tqdm(total=total, initial=have, unit="B", unit_scale=True, unit_divisor=1024, desc=dest.name) as bar:
-                    for chunk in r.iter_content(1 << 20):
-                        f.write(chunk); bar.update(len(chunk))
-            break
-        except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as e:
-            if i == tries - 1:
-                raise
-            wait = min(10 * 2 ** i, 300)
-            print(f"{dest.name}: {type(e).__name__}, retrying in {wait} s ({i + 1}/{tries - 1})", flush=True)
-            time.sleep(wait)
-    tmp.replace(dest)
-    return dest
 
 
 def s3_dirs(s3, bucket, prefix):
@@ -112,6 +80,83 @@ def s3_exists(s3, bucket, key):
         if e.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
             return False
         raise
+
+
+def s3_size(s3, bucket, key, dest):
+    """(bytes of the object, bytes still to download): 0 to download when a file of the same size is on disk."""
+    size = s3.head_object(Bucket=bucket, Key=key)["ContentLength"]
+    dest = Path(dest)
+    return size, 0 if dest.exists() and dest.stat().st_size == size else size
+
+
+def _retry(fn, what, tries=8):
+    """fn() retried after a time-out or dropped connection, waiting 10 s, 20 s, ... up to 5 min between tries."""
+    for i in range(tries):
+        try:
+            return fn()
+        except RETRY as e:
+            if i == tries - 1:
+                raise
+            wait = min(10 * 2 ** i, 300)
+            print(f"{what}: {type(e).__name__}, retrying in {wait} s ({i + 1}/{tries - 1})", flush=True)
+            time.sleep(wait)
+
+
+def _size(url, timeout):
+    """Size of the file at `url` if the server serves byte ranges, else None."""
+    with requests.get(url, headers={"Range": "bytes=0-0"}, stream=True, timeout=timeout) as r:
+        r.raise_for_status()
+        cr = r.headers.get("Content-Range", "")
+        return int(cr.rsplit("/", 1)[1]) if r.status_code == 206 and cr.rsplit("/", 1)[-1].isdigit() else None
+
+
+def _fetch(url, f, a, b, timeout, progress):
+    """Bytes a..b (inclusive; b None = to the end) of `url` appended to file `f`, continuing what `f` already holds."""
+    have = f.stat().st_size if f.exists() else 0
+    if b is not None and have == b - a + 1:
+        return
+    hdr = {"Range": f"bytes={a + have}-{'' if b is None else b}"} if have or b is not None else {}
+    with requests.get(url, headers=hdr, stream=True, timeout=timeout) as r:
+        r.raise_for_status()
+        if hdr and r.status_code != 206:                              # server ignored Range: start again
+            have = 0; progress(-f.stat().st_size if f.exists() else 0)
+        with open(f, "ab" if have else "wb") as o:
+            for chunk in r.iter_content(1 << 20):
+                o.write(chunk); progress(len(chunk))
+    if b is not None and f.stat().st_size != b - a + 1:
+        raise requests.exceptions.ChunkedEncodingError(f"{f.name}: connection closed early")
+
+
+def http_get(url, dest, tries=8, timeout=60):
+    """Download a URL to `dest` with a progress bar; skipped when `dest` exists. If the server serves byte ranges the
+    file is fetched as parts of PART_BYTES, PARTS_AT_ONCE at a time, each kept in `dest`.parts/ until all are there;
+    otherwise as one stream into `dest`.part. Time-outs are retried and a rerun continues from the bytes on disk."""
+    dest = Path(dest)
+    if dest.exists():
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    size = _retry(lambda: _size(url, timeout), dest.name, tries)
+    lock = threading.Lock()
+    with tqdm(total=size, unit="B", unit_scale=True, unit_divisor=1024, desc=dest.name) as bar:
+        def update(n):
+            with lock: bar.update(n)
+        if size is None:
+            tmp = dest.with_name(dest.name + ".part")
+            if tmp.exists(): update(tmp.stat().st_size)
+            _retry(lambda: _fetch(url, tmp, 0, None, timeout, update), dest.name, tries)
+        else:
+            parts = dest.with_name(dest.name + ".parts"); parts.mkdir(exist_ok=True)
+            ranges = [(parts / f"{i:06d}", a, min(a + PART_BYTES, size) - 1) for i, a in enumerate(range(0, size, PART_BYTES))]
+            update(sum(f.stat().st_size for f, _, _ in ranges if f.exists()))
+            with ThreadPoolExecutor(PARTS_AT_ONCE) as ex:
+                list(ex.map(lambda r: _retry(lambda: _fetch(url, *r, timeout, update), dest.name, tries), ranges))
+            tmp = dest.with_name(dest.name + ".part")
+            with open(tmp, "wb") as o:
+                for f, _, _ in ranges:
+                    with open(f, "rb") as i: shutil.copyfileobj(i, o, 1 << 24)
+            shutil.rmtree(parts)
+    tmp.replace(dest)
+    return dest
 
 
 def hcp_keys(sid, kind="3T", release="HCP_1200"):
