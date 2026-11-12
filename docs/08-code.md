@@ -11,7 +11,7 @@ file the code writes.
 | `notebooks/00`–`10` | The experiment (below) |
 | `scripts/setup.sh` | Creates `.venv` (Python 3.12–3.13), installs the pinned packages (CUDA 13 PyTorch on Linux), installs the package, registers the `retinopath` Jupyter kernel, runs a 3D convolution on the device |
 | `scripts/download_data.sh` | `python -m retinopath.pipeline` for `full` or `dev`; `WORKERS` sets the number of parallel downloads |
-| `scripts/run_all.sh` | Runs notebooks 00–10 in order. Each is copied to `outputs/executed/` with `DEV_MODE` set and executed there, so `notebooks/` stays clean |
+| `scripts/run_all.sh` | Runs the download step in the terminal (live progress bars; `WORKERS` as above), then notebooks 00–10 in order. Each is copied to `outputs/executed/` with `DEV_MODE` set and executed there, so `notebooks/` stays clean |
 | `scripts/run_notebook.sh` | Executes one notebook in place, with the `DEV_MODE` saved in it |
 | `requirements.txt` | Pinned packages for macOS, including PyTorch |
 | `requirements-dgx.txt` | The same pins for Linux with CUDA; PyTorch comes from the CUDA 13 wheel index |
@@ -75,12 +75,15 @@ together otherwise.
 | `read_env` | `KEY=value` lines of `.env` |
 | `hcp_client` | S3 client for `hcp-openaccess` with the keys in `.env` |
 | `anon_client` | Unsigned S3 client for public buckets |
-| `s3_get` | Downloads one object unless a file of the same size exists; writes to a name unique to the thread, then renames |
+| `S3_CONFIG` | Both clients: up to 10 attempts per request, 30 s connect and 120 s read time-out |
+| `s3_get` | Downloads one object unless a file of the same size exists; writes to a name unique to the thread, then renames; `progress` receives the bytes as they arrive |
+| `s3_size` | Size of an object and the bytes still to download (0 when the file on disk has that size) |
+| `http_get` | Downloads a URL with a progress bar; on a time-out or dropped connection retries up to 8 times (10 s, 20 s, … up to 5 min apart), continuing from the `.part` file with a Range request |
 | `s3_dirs` | Sub-folder names under a prefix (all pages) |
 | `s3_exists` | False only for a missing object; wrong keys or network errors raise |
 | `hcp_keys`, `hcp_download` | The files of one HCP session: 3T = diffusion, mask, `aparc+aseg`, white and pial MSMAll surfaces; 7T = the diffusion files |
 | `hcp_figure_keys` | Very inflated MSMAll surfaces of both hemispheres (figures only) |
-| `osf_download` | `prfresults.mat` and `atlas.mat` from OSF |
+| `osf_download` | `prfresults.mat` and `atlas.mat` from OSF (`http_get`) |
 | `update_manifest` | Size and ETag of every downloaded file in `data/manifest.json` |
 
 ### `subject.py`: HCP crop ([05-preprocessing.md](05-preprocessing.md#hcp-crop-subjectbuild_anat-subjectload_dwi_crop))
@@ -280,7 +283,8 @@ Fetches the retinotopy files, builds the subject lists, then downloads every ses
 crop is not cached yet, in parallel threads: HCP 3T for test, training, validation and retest subjects, HCP 7T for
 `t7`, HCP retest, and both NSD runs. It also fetches the sphere and atlas files and the very inflated surfaces of
 the test subjects (for Figure 1; fetched even when their crop is cached, so a cache made earlier gets them too), and
-updates the manifest.
+updates the manifest. It first asks S3 for the size of every file and prints how many files and gigabytes are
+still missing; the download bar then counts bytes against that total, with speed and time left.
 `--list` only builds the lists and counts the sessions.
 
 ## Notebooks

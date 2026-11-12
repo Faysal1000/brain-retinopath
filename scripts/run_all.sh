@@ -2,6 +2,7 @@
 # Run every notebook in order, without a browser.  Usage:  bash scripts/run_all.sh dev    (small test run)
 #                                                          bash scripts/run_all.sh full   (full experiment)
 # Stop any time with Ctrl-C. Run the same command again later: it continues where it stopped.
+# WORKERS=16 bash scripts/run_all.sh full   uses more parallel downloads (default 8).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 case "${1:-}" in
@@ -10,6 +11,11 @@ case "${1:-}" in
   *) echo "usage: bash scripts/run_all.sh dev|full"; exit 1 ;;
 esac
 mkdir -p outputs/executed
+# Download first, outside the notebooks, so the progress bars show in this terminal (nbconvert does not show cell
+# output while a notebook runs). Notebook 01 then only checks the files.
+echo "=== download  ($(date '+%F %T'))"
+DFLAG=""; [ "$1" = "dev" ] && DFLAG="--dev"
+PYTHONWARNINGS=ignore .venv/bin/python -m retinopath.pipeline $DFLAG --workers "${WORKERS:-8}"
 for nb in notebooks/[0-9][0-9]_*.ipynb; do
   name=$(basename "$nb" .ipynb)
   echo "=== $name  ($(date '+%F %T'))"

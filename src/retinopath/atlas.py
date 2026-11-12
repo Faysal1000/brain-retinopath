@@ -4,6 +4,7 @@ scan, which is what a clinical dataset would have."""
 import nibabel as nib
 import numpy as np
 from scipy.spatial import cKDTree
+from .download import http_get
 from .nsd import FS, bridge_file
 
 MAPS = "https://raw.githubusercontent.com/noahbenson/neuropythy/master/neuropythy/lib/data/fsaverage/surf/{fs}.benson14_{q}.v4_0.mgz"
@@ -13,15 +14,12 @@ SPHERE = ("https://raw.githubusercontent.com/Washington-University/HCPpipelines/
 
 def atlas_files(cfg, h):
     """Download once (about 6 MB per hemisphere). Returns {angle, eccen, varea, sphere: path}."""
-    import requests
     d = cfg.P.osf / "benson14"; d.mkdir(parents=True, exist_ok=True)
     urls = {q: MAPS.format(fs=FS[h], q=q) for q in ("angle", "eccen", "varea")} | {"sphere": SPHERE.format(h=h)}
     out = {}
     for q, u in urls.items():
         out[q] = d / u.rsplit("/", 1)[1]
-        if not out[q].exists():
-            r = requests.get(u, timeout=300); r.raise_for_status()
-            tmp = out[q].with_name(out[q].name + ".part"); tmp.write_bytes(r.content); tmp.replace(out[q])
+        http_get(u, out[q])
     return out
 
 

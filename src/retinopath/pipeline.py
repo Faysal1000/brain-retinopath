@@ -6,14 +6,14 @@ nsd / nsd2 (first / second NSD diffusion run). Cache files live in cfg.P.cache/<
 A "method" names the fODF and, after a plus sign, the tracker: csd, rumba, net_path_s0, csd+prob. No suffix means
 particle-filter tracking.
 """
-import copy, hashlib, json, shutil
+import copy, hashlib, json, shutil, threading
 import numpy as np
 from scipy.spatial import cKDTree
 from . import metrics as M, nsd
 from .atlas import atlas_files, atlas_key_source
 from .core import atomic, load_json, n_jobs, save_json
 from .degrade import make_protocol, to_grid
-from .download import HCP_BUCKET, anon_client, hcp_client, hcp_download, hcp_figure_keys, osf_download, s3_dirs, s3_exists, s3_get, update_manifest
+from .download import HCP_BUCKET, anon_client, hcp_client, hcp_download, hcp_figure_keys, hcp_keys, osf_download, s3_dirs, s3_exists, s3_get, s3_size, update_manifest
 from .recon import fit_fodf, signal_sh
 from .subject import build_anat, load_dwi_crop, load_prf, prf_subject_ids, subject_dir
 from .track import area_pairs, density_map, endpoints, make_seeds, run_tracking
@@ -342,12 +342,21 @@ def download_all(cfg, workers=8, list_only=False):
     s3, pub = hcp_client(cfg), anon_client()
     for h in "LR":
         nsd.bridge_file(cfg, h); atlas_files(cfg, h)
-    get = lambda j: hcp_download(cfg, j[1], j[2], j[3], s3) if j[0] == "hcp" else nsd.nsd_download(cfg, j[1], j[2], pub)
+    files = [(s3, HCP_BUCKET, k, cfg.P.hcp / k) for j in jobs if j[0] == "hcp" for k in hcp_keys(j[1], j[2], j[3])]
+    files += [(pub, nsd.BUCKET, k, cfg.P.nsd / k) for j in jobs if j[0] == "nsd" for k in nsd.nsd_keys(j[1], j[2])]
+    # inflated surfaces of the test subjects for the figures (notebook 10); fetched even when a scan is cropped
+    files += [(s3, HCP_BUCKET, k, cfg.P.hcp / k) for s in subjects["test"] for k in hcp_figure_keys(s)]
+    files = list({f[2]: f for f in files}.values())
     with ThreadPoolExecutor(workers) as ex:
-        rows = [r for rs in tqdm(ex.map(get, jobs), total=len(jobs), desc="download") for r in rs]
-        # inflated surfaces of the test subjects for the figures (notebook 10); fetched even when a scan is cropped
-        keys = [k for s in subjects["test"] for k in hcp_figure_keys(s)]
-        rows += list(ex.map(lambda k: s3_get(s3, HCP_BUCKET, k, cfg.P.hcp / k), keys))
+        sizes = list(tqdm(ex.map(lambda f: s3_size(*f), files), total=len(files), desc="checking files on disk"))
+        total, todo = sum(s[0] for s in sizes), sum(s[1] for s in sizes)
+        print(f"{len(files)} files, {total / 1e9:.1f} GB: {sum(s[1] > 0 for s in sizes)} files, {todo / 1e9:.1f} GB "
+              f"to download", flush=True)
+        lock = threading.Lock()
+        with tqdm(total=todo, unit="B", unit_scale=True, unit_divisor=1024, desc="download", smoothing=0.05) as bar:
+            def progress(n):
+                with lock: bar.update(n)
+            rows = list(ex.map(lambda f: s3_get(*f, progress=progress), files))
     man = update_manifest(cfg, rows)
     print(len(man), "files in data/manifest.json,", round(sum(v["bytes"] for v in man.values()) / 1e9, 1), "GB", flush=True)
     return rows

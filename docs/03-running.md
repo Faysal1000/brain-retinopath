@@ -42,7 +42,8 @@ bash scripts/download_data.sh [dev]      # all data for the chosen configuration
 bash scripts/run_all.sh dev|full         # notebooks 00 to 10 in order
 ```
 
-`run_all.sh` copies each notebook to `outputs/executed/`, sets `DEV_MODE` there and executes it, so the notebooks
+`run_all.sh` first runs the download step itself, so its progress bars (files checked, then gigabytes downloaded
+with speed and time left) show in the terminal; after `download_data.sh` this only checks the files. It then copies each notebook to `outputs/executed/`, sets `DEV_MODE` there and executes it, so the notebooks
 in `notebooks/` stay clean. To work interactively instead:
 
 ```bash
@@ -115,6 +116,10 @@ Another wheel index can be given with `TORCH_INDEX=<url> bash scripts/setup.sh`.
 
 **"config.yaml changed in [...]".** A cached setting was changed; delete `data/cache` (or `data/cache/dev`) or
 restore the value ([04-configuration.md](04-configuration.md)).
+
+**Download stops with `ConnectionError` or `Read timed out`.** A server did not answer for too long. Each request
+is retried several times before this happens; run the same command again and it continues from the files and
+partial files already on disk.
 
 **HCP download fails with an access error.** Check the two keys in `.env`; they are tied to the account that
 accepted the HCP terms.

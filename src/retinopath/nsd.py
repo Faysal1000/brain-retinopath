@@ -7,7 +7,7 @@ import nibabel as nib
 import numpy as np
 from scipy.spatial import cKDTree
 from .degrade import resample
-from .download import anon_client, s3_get
+from .download import anon_client, http_get, s3_get
 from .subject import crop_box, shifted_affine, tissue_maps
 
 BUCKET = "natural-scenes-dataset"
@@ -29,12 +29,7 @@ def nsd_keys(sid, run=1):
 
 def bridge_file(cfg, h):
     """HCP's standard sphere that places the fsLR 32k mesh on the fsaverage sphere (downloaded once, about 0.7 MB)."""
-    import requests
-    f = cfg.P.osf / "fsaverage_bridge" / f"fs_LR-deformed_to-fsaverage.{h}.sphere.32k_fs_LR.surf.gii"
-    if not f.exists():
-        f.parent.mkdir(parents=True, exist_ok=True)
-        r = requests.get(BRIDGE.format(h=h), timeout=120); r.raise_for_status(); f.write_bytes(r.content)
-    return f
+    return http_get(BRIDGE.format(h=h), cfg.P.osf / "fsaverage_bridge" / f"fs_LR-deformed_to-fsaverage.{h}.sphere.32k_fs_LR.surf.gii")
 
 
 def template_prf(cfg, sid, h):
