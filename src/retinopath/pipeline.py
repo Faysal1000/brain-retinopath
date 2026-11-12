@@ -353,10 +353,17 @@ def download_all(cfg, workers=8, list_only=False):
         print(f"{len(files)} files, {total / 1e9:.1f} GB: {sum(s[1] > 0 for s in sizes)} files, {todo / 1e9:.1f} GB "
               f"to download", flush=True)
         lock = threading.Lock()
-        with tqdm(total=todo, unit="B", unit_scale=True, unit_divisor=1024, desc="download", smoothing=0.05) as bar:
+        need = [f for f, sz in zip(files, sizes) if sz[1]]; done = [0]
+        # one bar for the whole download: bytes against everything still missing, with speed, time left and files done
+        with tqdm(total=todo, unit="B", unit_scale=True, unit_divisor=1024, desc="whole dataset", smoothing=0.05,
+                  postfix=f"0/{len(need)} files") as bar:
             def progress(n):
                 with lock: bar.update(n)
-            rows = list(ex.map(lambda f: s3_get(*f, progress=progress), files))
+            def get(f):
+                r = s3_get(*f, progress=progress)
+                with lock: done[0] += 1; bar.set_postfix_str(f"{done[0]}/{len(need)} files")
+                return r
+            rows = list(ex.map(get, need)) + [(f[2], sz[0], sz[2]) for f, sz in zip(files, sizes) if not sz[1]]
     man = update_manifest(cfg, rows)
     print(len(man), "files in data/manifest.json,", round(sum(v["bytes"] for v in man.values()) / 1e9, 1), "GB", flush=True)
     return rows

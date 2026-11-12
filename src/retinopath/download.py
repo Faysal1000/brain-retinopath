@@ -20,6 +20,8 @@ PART_BYTES, PARTS_AT_ONCE = 8 << 20, 16
 S3_CONFIG = dict(retries={"max_attempts": 10, "mode": "standard"}, connect_timeout=30, read_timeout=120,
                  max_pool_connections=512)
 S3_TRANSFER = TransferConfig(multipart_threshold=PART_BYTES, multipart_chunksize=PART_BYTES, max_concurrency=PARTS_AT_ONCE)
+# no compression: sizes and byte ranges then count the bytes of the file itself (GitHub gzips by default)
+PLAIN = {"Accept-Encoding": "identity"}
 RETRY = (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError)
 
 
@@ -83,10 +85,10 @@ def s3_exists(s3, bucket, key):
 
 
 def s3_size(s3, bucket, key, dest):
-    """(bytes of the object, bytes still to download): 0 to download when a file of the same size is on disk."""
-    size = s3.head_object(Bucket=bucket, Key=key)["ContentLength"]
+    """(bytes of the object, bytes still to download, etag): 0 to download when a file of the same size is on disk."""
+    head = s3.head_object(Bucket=bucket, Key=key); size = head["ContentLength"]
     dest = Path(dest)
-    return size, 0 if dest.exists() and dest.stat().st_size == size else size
+    return size, 0 if dest.exists() and dest.stat().st_size == size else size, head["ETag"].strip('"')
 
 
 def _retry(fn, what, tries=8):
@@ -104,7 +106,7 @@ def _retry(fn, what, tries=8):
 
 def _size(url, timeout):
     """Size of the file at `url` if the server serves byte ranges, else None."""
-    with requests.get(url, headers={"Range": "bytes=0-0"}, stream=True, timeout=timeout) as r:
+    with requests.get(url, headers={**PLAIN, "Range": "bytes=0-0"}, stream=True, timeout=timeout) as r:
         r.raise_for_status()
         cr = r.headers.get("Content-Range", "")
         return int(cr.rsplit("/", 1)[1]) if r.status_code == 206 and cr.rsplit("/", 1)[-1].isdigit() else None
@@ -115,8 +117,10 @@ def _fetch(url, f, a, b, timeout, progress):
     have = f.stat().st_size if f.exists() else 0
     if b is not None and have == b - a + 1:
         return
+    if b is not None and have > b - a + 1:                            # left by an older, broken run
+        progress(-have); f.unlink(); have = 0
     hdr = {"Range": f"bytes={a + have}-{'' if b is None else b}"} if have or b is not None else {}
-    with requests.get(url, headers=hdr, stream=True, timeout=timeout) as r:
+    with requests.get(url, headers={**PLAIN, **hdr}, stream=True, timeout=timeout) as r:
         r.raise_for_status()
         if hdr and r.status_code != 206:                              # server ignored Range: start again
             have = 0; progress(-f.stat().st_size if f.exists() else 0)

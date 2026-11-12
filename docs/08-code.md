@@ -77,7 +77,7 @@ together otherwise.
 | `anon_client` | Unsigned S3 client for public buckets |
 | `S3_CONFIG`, `S3_TRANSFER` | Both clients: up to 10 attempts per request, 30 s connect and 120 s read time-out, a pool of 512 connections; each file is fetched as 8 MB parts, 16 at a time (one connection gives only 1–2 MB/s) |
 | `s3_get` | Downloads one object unless a file of the same size exists; writes to a name unique to the thread, then renames; `progress` receives the bytes as they arrive |
-| `s3_size` | Size of an object and the bytes still to download (0 when the file on disk has that size) |
+| `s3_size` | Size of an object, the bytes still to download (0 when the file on disk has that size) and its ETag |
 | `http_get` | Downloads a URL with a progress bar, as 8 MB byte ranges 16 at a time (kept in `<file>.parts/` until complete) when the server allows it; time-outs are retried up to 8 times (10 s, 20 s, … up to 5 min apart) and a rerun continues from the parts on disk |
 | `s3_dirs` | Sub-folder names under a prefix (all pages) |
 | `s3_exists` | False only for a missing object; wrong keys or network errors raise |
@@ -284,7 +284,7 @@ crop is not cached yet, in parallel threads: HCP 3T for test, training, validati
 `t7`, HCP retest, and both NSD runs. It also fetches the sphere and atlas files and the very inflated surfaces of
 the test subjects (for Figure 1; fetched even when their crop is cached, so a cache made earlier gets them too), and
 updates the manifest. It first asks S3 for the size of every file and prints how many files and gigabytes are
-still missing; the download bar then counts bytes against that total, with speed and time left.
+still missing; one bar, `whole dataset`, then counts bytes against that total, with speed, time left and files done.
 `--list` only builds the lists and counts the sessions.
 
 ## Notebooks

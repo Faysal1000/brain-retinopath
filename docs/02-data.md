@@ -27,7 +27,7 @@ bash scripts/download_data.sh dev    # dev subjects only
 Builds the subject lists, prints how many files and gigabytes are still missing, then downloads in parallel with a
 progress bar (`WORKERS=16` for more connections). Complete files are skipped and time-outs are retried, so it can
 be stopped and started again. Sizes: about 1.4 GB per HCP 3T subject, 1.1 GB per 7T scan,
-4.1 GB per NSD run, 1 GB of retinotopy results; about 370 GB for the default full configuration.
+4.1 GB per NSD run, 1 GB of retinotopy results; about 336 GB (2,231 files) for the default full configuration.
 
 ## Files read
 
