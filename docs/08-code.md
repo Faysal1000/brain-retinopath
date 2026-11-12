@@ -76,7 +76,7 @@ together otherwise.
 | `read_env` | `KEY=value` lines of `.env` |
 | `hcp_client` | S3 client for `hcp-openaccess` with the keys in `.env` |
 | `anon_client` | Unsigned S3 client for public buckets |
-| `S3_CONFIG`, `S3_TRANSFER` | Both clients: up to 10 attempts per request, 30 s connect and 120 s read time-out, a pool of 512 connections; each file is fetched as 8 MB parts, 16 at a time (one connection gives only 1–2 MB/s) |
+| `S3_CONFIG`, `S3_TRANSFER` | Both clients: up to 10 attempts per request, 15 s connect and 30 s read time-out (a stalled connection is retried rather than holding up its file), a pool of 512 connections; each file is fetched as 8 MB parts, 16 at a time (one connection gives only 1–2 MB/s) |
 | `s3_get` | Downloads one object unless a file of the same size exists; writes to a name unique to the thread, then renames; `progress` receives the bytes as they arrive |
 | `s3_size` | Size of an object, the bytes still to download (0 when the file on disk has that size) and its ETag |
 | `http_get` | Downloads a URL with a progress bar, as 8 MB byte ranges 16 at a time (kept in `<file>.parts/` until complete) when the server allows it; time-outs and server errors (HTTP 5xx, 429) are retried up to 8 times (10 s, 20 s, … up to 5 min apart) and a rerun continues from the parts on disk |
@@ -84,6 +84,7 @@ together otherwise.
 | `s3_exists` | False only for a missing object; wrong keys or network errors raise |
 | `hcp_keys`, `hcp_download` | The files of one HCP session: 3T = diffusion, mask, `aparc+aseg`, white and pial MSMAll surfaces; 7T = the diffusion files |
 | `hcp_figure_keys` | Very inflated MSMAll surfaces of both hemispheres (figures only) |
+| `remove_stale_parts` | Deletes the `<file>.<pid>.<thread>.part` files that `s3_get` left in a stopped run (process no longer running) |
 | `osf_download` | `prfresults.mat` and `atlas.mat` from OSF (`http_get`) |
 | `update_manifest` | Size and ETag of every downloaded file in `data/manifest.json` |
 

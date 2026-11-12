@@ -15,9 +15,10 @@ OSF_FILES = {"prfresults.mat": "https://osf.io/download/yus6t/",
              "atlas.mat": "https://osf.io/download/523df/"}
 # One connection to these servers gives 1-2 MB/s whatever the line speed, so large files are fetched as many byte
 # ranges at once. S3 retries time-outs and dropped connections itself. The connection pool is shared by all download
-# threads and must hold workers x PARTS_AT_ONCE connections, or the extra threads wait for a free one.
+# threads and must hold workers x PARTS_AT_ONCE connections, or the extra threads wait for a free one. A file is
+# complete only when its slowest part is, so a stalled connection is dropped and retried after 30 s without data.
 PART_BYTES, PARTS_AT_ONCE = 8 << 20, 16
-S3_CONFIG = dict(retries={"max_attempts": 10, "mode": "standard"}, connect_timeout=30, read_timeout=120,
+S3_CONFIG = dict(retries={"max_attempts": 10, "mode": "standard"}, connect_timeout=15, read_timeout=30,
                  max_pool_connections=512)
 S3_TRANSFER = TransferConfig(multipart_threshold=PART_BYTES, multipart_chunksize=PART_BYTES, max_concurrency=PARTS_AT_ONCE)
 # no compression: sizes and byte ranges then count the bytes of the file itself (GitHub gzips by default)
@@ -60,6 +61,23 @@ def s3_get(s3, bucket, key, dest, progress=None):
         tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{threading.get_ident()}.part")
         s3.download_file(bucket, key, str(tmp), Callback=progress, Config=S3_TRANSFER); tmp.replace(dest)
     return key, size, etag
+
+
+def remove_stale_parts(root):
+    """Delete the .part files of s3_get left by stopped runs (named <file>.<pid>.<thread>.part, the process gone)."""
+    for f in Path(root).rglob("*.part"):
+        pid = f.name.rsplit(".", 3)[-3] if f.name.count(".") >= 3 else ""
+        if pid.isdigit() and not _running(int(pid)):
+            f.unlink(missing_ok=True)
+
+
+def _running(pid):
+    try:
+        os.kill(pid, 0); return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def s3_dirs(s3, bucket, prefix):

@@ -13,7 +13,7 @@ from . import metrics as M, nsd
 from .atlas import atlas_files, atlas_key_source
 from .core import atomic, load_json, n_jobs, save_json
 from .degrade import make_protocol, to_grid
-from .download import HCP_BUCKET, anon_client, hcp_client, hcp_download, hcp_figure_keys, hcp_keys, osf_download, s3_dirs, s3_exists, s3_get, s3_size, update_manifest
+from .download import HCP_BUCKET, anon_client, hcp_client, hcp_download, hcp_figure_keys, hcp_keys, osf_download, s3_dirs, s3_exists, s3_get, s3_size, update_manifest, remove_stale_parts
 from .recon import fit_fodf, signal_sh
 from .subject import build_anat, load_dwi_crop, load_prf, prf_subject_ids, subject_dir
 from .track import area_pairs, density_map, endpoints, make_seeds, run_tracking
@@ -321,7 +321,7 @@ def run_grid(cfg, sessions, combos, name, device="cpu", **kw):
 
 
 # ---------------------------------------------------------------- download everything
-def download_all(cfg, workers=8, list_only=False):
+def download_all(cfg, workers=16, list_only=False):
     """Fetch every file the configured run needs: retinotopy results (OSF), HCP 3T / 7T / retest scans (S3, keys in
     .env) and NSD (public S3). Complete files are skipped, so it can be stopped and run again.
     Returns the list of (key, bytes, etag) rows; with list_only=True nothing large is downloaded."""
@@ -340,6 +340,7 @@ def download_all(cfg, workers=8, list_only=False):
     if list_only:
         return []
     s3, pub = hcp_client(cfg), anon_client()
+    remove_stale_parts(cfg.P.hcp); remove_stale_parts(cfg.P.nsd)
     for h in "LR":
         nsd.bridge_file(cfg, h); atlas_files(cfg, h)
     files = [(s3, HCP_BUCKET, k, cfg.P.hcp / k) for j in jobs if j[0] == "hcp" for k in hcp_keys(j[1], j[2], j[3])]
@@ -373,7 +374,7 @@ if __name__ == "__main__":                                    # python -m retino
     import argparse
     from .core import load_config
     ap = argparse.ArgumentParser(description="Download all data needed by config.yaml")
-    ap.add_argument("--dev", action="store_true"); ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--dev", action="store_true"); ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--list", action="store_true", help="only build the subject lists and count the scans")
     a = ap.parse_args()
     download_all(load_config(a.dev), a.workers, a.list)
