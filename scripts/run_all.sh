@@ -17,8 +17,8 @@ DFLAG=""; [ "$1" = "dev" ] && DFLAG="--dev"
 PYTHONWARNINGS=ignore .venv/bin/python -m retinopath.pipeline $DFLAG --workers "${WORKERS:-8}"
 for nb in notebooks/[0-9][0-9]_*.ipynb; do
   name=$(basename "$nb" .ipynb)
-  echo "=== $name  ($(date '+%F %T'))"
+  printf "\n\n"; echo "=== $name  ($(date '+%F %T'))"
   # runs a copy with DEV_MODE set and prints its output live; the notebooks in notebooks/ are not modified
   PYTHONWARNINGS=ignore .venv/bin/python scripts/run_notebook.py "$nb" "outputs/executed/$name.ipynb" --dev "$FLAG"
 done
-echo "=== all notebooks finished. Executed copies with their outputs: outputs/executed/"
+printf "\n"; echo "=== all notebooks finished. Executed copies with their outputs: outputs/executed/"
