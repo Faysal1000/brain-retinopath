@@ -127,7 +127,7 @@ Each protocol in `config.yaml` is simulated from the session's own full-quality 
    directions count as the same). Deterministic, so every subject gets the same subset. `all` keeps every
    direction.
 2. **Voxel size** (`resample`). A separable Gaussian low-pass filter with FWHM = √(out² − in²) mm (the extra blur a
-   larger voxel adds), then trilinear resampling to the new isotropic voxel size over the same field of view. The
+   larger voxel adds; SciPy, edges repeated), then trilinear resampling to the new isotropic voxel size over the same field of view. The
    affine is updated for the exact per-axis scale and the half-voxel shift of the voxel centres. Tissue fractions
    are resampled the same way.
 3. **Noise** (`add_rician`). With `snr` set, Rician noise of σ = (mean b=0 signal in white matter) / snr: a

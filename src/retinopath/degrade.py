@@ -2,6 +2,7 @@
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.ndimage import convolve1d
 
 
 def pick_directions(bvecs, n):
@@ -31,16 +32,17 @@ def resample(vol, affine, voxel_out, lowpass=True):
     vin = float(abs(affine[0, 0]))
     if abs(voxel_out - vin) < 1e-3:
         return vol, affine
-    x = torch.from_numpy(np.ascontiguousarray(vol)).float()
-    x = x[..., None] if x.ndim == 3 else x
-    x = x.permute(3, 0, 1, 2)[:, None]                                      # (N, 1, X, Y, Z)
+    v = np.asarray(vol, np.float32)
     sigma = np.sqrt(max(voxel_out ** 2 - vin ** 2, 0)) / 2.355 / vin        # input voxels; FWHM = sqrt(out^2 - in^2) mm
     if sigma > 0 and lowpass:
-        r = int(np.ceil(3 * sigma)); k = torch.exp(-0.5 * (torch.arange(-r, r + 1) / sigma) ** 2); k /= k.sum()
+        # separable Gaussian, edges repeated. SciPy rather than torch.conv3d: the CPU convolution of the Linux aarch64
+        # PyTorch wheel (oneDNN) fails on these volumes with "label is too far"
+        r = int(np.ceil(3 * sigma)); k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2); k /= k.sum()
         for d in range(3):
-            shape = [1, 1, 1, 1, 1]; shape[2 + d] = -1
-            pad = [0, 0, 0, 0, 0, 0]; pad[2 * (2 - d)] = pad[2 * (2 - d) + 1] = r
-            x = F.conv3d(F.pad(x, pad, mode="replicate"), k.view(shape))
+            v = convolve1d(v, k.astype(np.float32), axis=d, mode="nearest")
+    x = torch.from_numpy(np.ascontiguousarray(v))
+    x = x[..., None] if x.ndim == 3 else x
+    x = x.permute(3, 0, 1, 2)[:, None]                                      # (N, 1, X, Y, Z)
     size = [max(2, int(round(s * vin / voxel_out))) for s in x.shape[2:]]
     y = F.interpolate(x, size=size, mode="trilinear", align_corners=False)[:, 0].permute(1, 2, 3, 0).numpy()
     s = np.array(x.shape[2:]) / np.array(size)                              # exact per-axis scale

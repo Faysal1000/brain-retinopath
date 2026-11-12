@@ -92,12 +92,14 @@ def s3_size(s3, bucket, key, dest):
 
 
 def _retry(fn, what, tries=8):
-    """fn() retried after a time-out or dropped connection, waiting 10 s, 20 s, ... up to 5 min between tries."""
+    """fn() retried after a time-out, a dropped connection or a server-side error (HTTP 5xx, 429), waiting 10 s,
+    20 s, ... up to 5 min between tries. Other HTTP errors (404, 403) are raised at once."""
     for i in range(tries):
         try:
             return fn()
-        except RETRY as e:
-            if i == tries - 1:
+        except (*RETRY, requests.HTTPError) as e:
+            code = e.response.status_code if isinstance(e, requests.HTTPError) and e.response is not None else None
+            if i == tries - 1 or (isinstance(e, requests.HTTPError) and not (code == 429 or (code or 0) >= 500)):
                 raise
             wait = min(10 * 2 ** i, 300)
             print(f"{what}: {type(e).__name__}, retrying in {wait} s ({i + 1}/{tries - 1})", flush=True)

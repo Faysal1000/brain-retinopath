@@ -64,8 +64,11 @@ def check_cache_settings(cfg):
 
 
 def get_device():
-    """CUDA if available, else MPS, else CPU."""
-    import torch
+    """CUDA if available, else MPS, else CPU. On Linux aarch64 the oneDNN CPU kernels are switched off: the JIT code
+    they generate fails on large 3D inputs ("label is too far"); PyTorch then uses its own CPU kernels."""
+    import platform, torch
+    if platform.system() == "Linux" and platform.machine() == "aarch64":
+        torch.backends.mkldnn.enabled = False
     if torch.cuda.is_available():
         return torch.device("cuda")
     if torch.backends.mps.is_available():
