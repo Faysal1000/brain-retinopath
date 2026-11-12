@@ -8,12 +8,13 @@ particle-filter tracking.
 """
 import copy, hashlib, json, shutil, threading
 import numpy as np
+from pathlib import Path
 from scipy.spatial import cKDTree
 from . import metrics as M, nsd
 from .atlas import atlas_files, atlas_key_source
 from .core import atomic, load_json, n_jobs, save_json
 from .degrade import make_protocol, to_grid
-from .download import HCP_BUCKET, anon_client, hcp_client, hcp_download, hcp_figure_keys, hcp_keys, osf_download, s3_dirs, s3_exists, s3_get, s3_size, update_manifest, remove_stale_parts
+from .download import HCP_BUCKET, anon_client, hcp_client, hcp_download, hcp_figure_keys, hcp_keys, osf_download, s3_dirs, s3_exists, s3_get, s3_size, s3_get_many, update_manifest, remove_stale_parts
 from .recon import fit_fodf, signal_sh
 from .subject import build_anat, load_dwi_crop, load_prf, prf_subject_ids, subject_dir
 from .track import area_pairs, density_map, endpoints, make_seeds, run_tracking
@@ -321,12 +322,11 @@ def run_grid(cfg, sessions, combos, name, device="cpu", **kw):
 
 
 # ---------------------------------------------------------------- download everything
-def download_all(cfg, workers=16, list_only=False):
+def download_all(cfg, workers=16, list_only=False, connections=256):
     """Fetch every file the configured run needs: retinotopy results (OSF), HCP 3T / 7T / retest scans (S3, keys in
-    .env) and NSD (public S3). Complete files are skipped, so it can be stopped and run again.
+    .env) and NSD (public S3). Complete files are skipped, so it can be stopped and run again. connections: 8 MB
+    parts fetched at once, over all files; workers: parallel size checks.
     Returns the list of (key, bytes, etag) rows; with list_only=True nothing large is downloaded."""
-    from concurrent.futures import ThreadPoolExecutor
-    from tqdm.auto import tqdm
     osf_download(cfg)
     subjects = make_subject_lists(cfg)
     print({k: len(v) for k, v in subjects.items()}, flush=True)
@@ -348,33 +348,44 @@ def download_all(cfg, workers=16, list_only=False):
     # inflated surfaces of the test subjects for the figures (notebook 10); fetched even when a scan is cropped
     files += [(s3, HCP_BUCKET, k, cfg.P.hcp / k) for s in subjects["test"] for k in hcp_figure_keys(s)]
     files = list({f[2]: f for f in files}.values())
-    with ThreadPoolExecutor(workers) as ex:
-        sizes = list(tqdm(ex.map(lambda f: s3_size(*f), files), total=len(files), desc="checking files on disk"))
-        total, todo = sum(s[0] for s in sizes), sum(s[1] for s in sizes)
-        print(f"{len(files)} files, {total / 1e9:.1f} GB: {sum(s[1] > 0 for s in sizes)} files, {todo / 1e9:.1f} GB "
-              f"to download", flush=True)
-        lock = threading.Lock()
-        need = [f for f, sz in zip(files, sizes) if sz[1]]; done = [0]
-        # one bar for the whole download: bytes against everything still missing, with speed, time left and files done
-        with tqdm(total=todo, unit="B", unit_scale=True, unit_divisor=1024, desc="whole dataset", smoothing=0.05,
-                  postfix=f"0/{len(need)} files") as bar:
-            def progress(n):
-                with lock: bar.update(n)
-            def get(f):
-                r = s3_get(*f, progress=progress)
-                with lock: done[0] += 1; bar.set_postfix_str(f"{done[0]}/{len(need)} files")
-                return r
-            rows = list(ex.map(get, need)) + [(f[2], sz[0], sz[2]) for f, sz in zip(files, sizes) if not sz[1]]
+    rows = _fetch_files(files, workers, connections)
     man = update_manifest(cfg, rows)
     print(len(man), "files in data/manifest.json,", round(sum(v["bytes"] for v in man.values()) / 1e9, 1), "GB", flush=True)
     return rows
 
 
-if __name__ == "__main__":                                    # python -m retinopath.pipeline [--dev] [--workers N] [--list]
+def _fetch_files(files, workers, connections):
+    """Download the files (client, bucket, key, dest) not yet on disk through `connections` shared connections, with
+    one progress bar for all of them. Returns (key, bytes, etag) rows of the files on disk."""
+    from concurrent.futures import ThreadPoolExecutor
+    from tqdm.auto import tqdm
+    with ThreadPoolExecutor(workers) as ex:
+        sizes = list(tqdm(ex.map(lambda f: s3_size(*f), files), total=len(files), desc="checking files on disk"))
+    total, todo = sum(s[0] for s in sizes), sum(s[1] for s in sizes)
+    print(f"{len(files)} files, {total / 1e9:.1f} GB: {sum(s[1] > 0 for s in sizes)} files, {todo / 1e9:.1f} GB "
+          f"to download", flush=True)
+    need = [(*f, sz[0], sz[2]) for f, sz in zip(files, sizes) if sz[1]]
+    lock = threading.Lock(); done = [0]
+    # one bar for the whole download: bytes against everything still missing, with speed, time left and files done
+    with tqdm(total=todo, unit="B", unit_scale=True, unit_divisor=1024, desc="whole dataset", smoothing=0.05,
+              postfix=f"0/{len(need)} files") as bar:
+        def progress(n):
+            with lock: bar.update(n)
+        def finished(row):
+            with lock: done[0] += 1; bar.set_postfix_str(f"{done[0]}/{len(need)} files")
+        rows = s3_get_many(need, connections, progress, finished)
+    return rows + [(f[2], sz[0], sz[2]) for f, sz in zip(files, sizes) if not sz[1]]
+
+
+if __name__ == "__main__":                       # python -m retinopath.pipeline [--dev] [--connections N] [--list]
     import argparse
     from .core import load_config
     ap = argparse.ArgumentParser(description="Download all data needed by config.yaml")
     ap.add_argument("--dev", action="store_true"); ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--list", action="store_true", help="only build the subject lists and count the scans")
+    ap.add_argument("--connections", type=int, default=256, help="8 MB parts fetched at once, over all files")
     a = ap.parse_args()
-    download_all(load_config(a.dev), a.workers, a.list)
+    import resource                                    # each connection is an open file; Linux allows 1024 by default
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (hard if hard != resource.RLIM_INFINITY else 65536, hard))
+    download_all(load_config(a.dev), a.workers, a.list, min(a.connections, 4096))

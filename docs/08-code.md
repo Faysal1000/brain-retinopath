@@ -10,8 +10,8 @@ file the code writes.
 | `config.yaml` | Every path and setting, commented in place ([04-configuration.md](04-configuration.md)) |
 | `notebooks/00`–`10` | The experiment (below) |
 | `scripts/setup.sh` | Creates `.venv` (Python 3.12–3.13), installs the pinned packages (CUDA 13 PyTorch on Linux), installs the package, registers the `retinopath` Jupyter kernel, runs a 3D convolution on the device |
-| `scripts/download_data.sh` | `python -m retinopath.pipeline` for `full` or `dev`; `WORKERS` sets the number of parallel downloads |
-| `scripts/run_all.sh` | Runs the download step (`WORKERS` as above), then notebooks 00–10 in order through `run_notebook.py` with `DEV_MODE` set |
+| `scripts/download_data.sh` | `python -m retinopath.pipeline` for `full` or `dev`; `CONNECTIONS` sets the number of parts fetched at once |
+| `scripts/run_all.sh` | Runs the download step (`CONNECTIONS` as above), then notebooks 00–10 in order through `run_notebook.py` with `DEV_MODE` set |
 | `scripts/run_notebook.py` | Executes a notebook without a browser into a copy (`outputs/executed/`), printing its output live; tqdm bars are drawn as text |
 | `scripts/run_notebook.sh` | One notebook through `run_notebook.py`, with the `DEV_MODE` saved in it |
 | `requirements.txt` | Pinned packages for macOS, including PyTorch |
@@ -76,7 +76,7 @@ together otherwise.
 | `read_env` | `KEY=value` lines of `.env` |
 | `hcp_client` | S3 client for `hcp-openaccess` with the keys in `.env` |
 | `anon_client` | Unsigned S3 client for public buckets |
-| `S3_CONFIG`, `S3_TRANSFER` | Both clients: up to 10 attempts per request, 15 s connect and 30 s read time-out (a stalled connection is retried rather than holding up its file), a pool of 512 connections; each file is fetched as 8 MB parts, 16 at a time (one connection gives only 1–2 MB/s) |
+| `S3_CONFIG`, `S3_TRANSFER` | Both clients: up to 10 attempts per request, 15 s connect and 30 s read time-out (a stalled connection is retried rather than holding up its file), a pool of 4096 connections; `s3_get` fetches a file as 8 MB parts, 16 at a time (one connection gives only 1–2 MB/s) |
 | `s3_get` | Downloads one object unless a file of the same size exists; writes to a name unique to the thread, then renames; `progress` receives the bytes as they arrive |
 | `s3_size` | Size of an object, the bytes still to download (0 when the file on disk has that size) and its ETag |
 | `http_get` | Downloads a URL with a progress bar, as 8 MB byte ranges 16 at a time (kept in `<file>.parts/` until complete) when the server allows it; time-outs and server errors (HTTP 5xx, 429) are retried up to 8 times (10 s, 20 s, … up to 5 min apart) and a rerun continues from the parts on disk |
@@ -84,6 +84,7 @@ together otherwise.
 | `s3_exists` | False only for a missing object; wrong keys or network errors raise |
 | `hcp_keys`, `hcp_download` | The files of one HCP session: 3T = diffusion, mask, `aparc+aseg`, white and pial MSMAll surfaces; 7T = the diffusion files |
 | `hcp_figure_keys` | Very inflated MSMAll surfaces of both hemispheres (figures only) |
+| `s3_get_many` | Downloads many objects as 8 MB parts through one shared pool of connections (`--connections`), so no connection waits for the last parts of another file; each file is written in place to `<file>.<pid>.0.part` and renamed when complete; failed parts retried 10 times; Ctrl-C stops all connections |
 | `remove_stale_parts` | Deletes the `<file>.<pid>.<thread>.part` files that `s3_get` left in a stopped run (process no longer running) |
 | `osf_download` | `prfresults.mat` and `atlas.mat` from OSF (`http_get`) |
 | `update_manifest` | Size and ETag of every downloaded file in `data/manifest.json` |
@@ -226,7 +227,7 @@ together otherwise.
 | `retest_scores` | Reproducibility between two scans |
 | `make_subject_lists` | Subject lists |
 | `run_grid` | Scores for sessions × (protocol, method), saved as a CSV |
-| `download_all` | Every file a configuration needs (also `python -m retinopath.pipeline [--dev] [--workers N] [--list]`) |
+| `download_all` | Every file a configuration needs (also `python -m retinopath.pipeline [--dev] [--connections N] [--list]`) |
 
 ### `stats.py`: statistics ([07-scoring.md](07-scoring.md#statistics-statspy-notebook-09))
 

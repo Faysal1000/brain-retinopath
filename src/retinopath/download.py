@@ -15,11 +15,12 @@ OSF_FILES = {"prfresults.mat": "https://osf.io/download/yus6t/",
              "atlas.mat": "https://osf.io/download/523df/"}
 # One connection to these servers gives 1-2 MB/s whatever the line speed, so large files are fetched as many byte
 # ranges at once. S3 retries time-outs and dropped connections itself. The connection pool is shared by all download
-# threads and must hold workers x PARTS_AT_ONCE connections, or the extra threads wait for a free one. A file is
+# threads and must hold workers x PARTS_AT_ONCE connections, or the extra threads wait for a free one. When a
+# network limits each connection rather than the total, more of them is faster: s3_get_many. A file is
 # complete only when its slowest part is, so a stalled connection is dropped and retried after 30 s without data.
 PART_BYTES, PARTS_AT_ONCE = 8 << 20, 16
 S3_CONFIG = dict(retries={"max_attempts": 10, "mode": "standard"}, connect_timeout=15, read_timeout=30,
-                 max_pool_connections=512)
+                 max_pool_connections=4096)
 S3_TRANSFER = TransferConfig(multipart_threshold=PART_BYTES, multipart_chunksize=PART_BYTES, max_concurrency=PARTS_AT_ONCE)
 # no compression: sizes and byte ranges then count the bytes of the file itself (GitHub gzips by default)
 PLAIN = {"Accept-Encoding": "identity"}
@@ -61,6 +62,69 @@ def s3_get(s3, bucket, key, dest, progress=None):
         tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{threading.get_ident()}.part")
         s3.download_file(bucket, key, str(tmp), Callback=progress, Config=S3_TRANSFER); tmp.replace(dest)
     return key, size, etag
+
+
+def s3_get_many(items, connections, progress=None, on_done=None):
+    """Download many objects as PART_BYTES byte ranges through one shared pool of `connections` connections.
+    items: (s3, bucket, key, dest, size, etag). A connection that finishes a part takes the next part of any file, so
+    none waits for the last, slow parts of another file (per-file pools sit idle then). Each file is written in place
+    into <dest>.<pid>.0.part and renamed when its last part is in. A failed part is retried 10 times (10 s, 20 s, ...
+    up to 5 min apart). progress(bytes) as data arrives; on_done((key, size, etag)) when a file is complete.
+    Returns the (key, size, etag) rows in the order of `items`."""
+    from concurrent.futures import ThreadPoolExecutor, FIRST_EXCEPTION, wait
+    stop, lock = threading.Event(), threading.Lock()
+    progress = progress or (lambda n: None)
+    left, tmps, tasks = {}, {}, []
+    for i, (s3, bucket, key, dest, size, etag) in enumerate(items):
+        dest = Path(dest); dest.parent.mkdir(parents=True, exist_ok=True)
+        tmps[i] = dest.with_name(f"{dest.name}.{os.getpid()}.0.part")
+        with open(tmps[i], "wb") as o: o.truncate(size)
+        ranges = [(a, min(a + PART_BYTES, size) - 1) for a in range(0, size, PART_BYTES)]
+        left[i] = len(ranges)
+        tasks += [(i, a, b) for a, b in ranges]
+        if not ranges: tmps[i].replace(dest); on_done and on_done((key, size, etag))
+
+    def part(i, a, b):
+        s3, bucket, key, dest, size, etag = items[i]
+        for t in range(10):
+            if stop.is_set(): return
+            got = 0
+            try:
+                body = s3.get_object(Bucket=bucket, Key=key, Range=f"bytes={a}-{b}")["Body"]
+                fd = os.open(tmps[i], os.O_WRONLY)
+                try:
+                    for chunk in body.iter_chunks(1 << 20):
+                        if stop.is_set(): return
+                        os.pwrite(fd, chunk, a + got); got += len(chunk); progress(len(chunk))
+                finally:
+                    os.close(fd)
+                if got != b - a + 1:
+                    raise IOError(f"{key}: {got} of {b - a + 1} bytes")
+                break
+            except ClientError as e:
+                progress(-got)
+                code = e.response["Error"]["Code"]
+                if t == 9 or not (code in ("SlowDown", "RequestTimeout", "InternalError", "ServiceUnavailable")
+                                  or str(e.response["ResponseMetadata"].get("HTTPStatusCode", 0)).startswith("5")):
+                    raise
+            except Exception:
+                progress(-got)
+                if t == 9 or stop.is_set(): raise
+            if stop.wait(min(10 * 2 ** t, 300)): return
+        with lock:
+            left[i] -= 1; last = left[i] == 0
+        if last:
+            tmps[i].replace(Path(dest)); on_done and on_done((key, size, etag))
+
+    ex = ThreadPoolExecutor(connections)
+    try:
+        futs = [ex.submit(part, *t) for t in tasks]
+        done, _ = wait(futs, return_when=FIRST_EXCEPTION)
+        for f in done:
+            f.result()
+    finally:                                               # Ctrl-C or a failed part: stop every connection at once
+        stop.set(); ex.shutdown(wait=True, cancel_futures=True)
+    return [(k, size, etag) for _, _, k, _, size, etag in items]
 
 
 def remove_stale_parts(root):
