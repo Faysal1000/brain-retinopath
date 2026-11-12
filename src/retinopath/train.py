@@ -3,7 +3,7 @@
 One GPU: ordinary training. Several GPUs: start with `torchrun --nproc_per_node=N -m retinopath.train ...`
 and the same code runs distributed (one process per GPU). All data sit on the GPU, so there is no loader bottleneck.
 """
-import argparse, atexit, math, os, re, signal, socket, time
+import argparse, atexit, copy, math, os, random, re, signal, socket, time
 # patch count and path length change during training; growing segments keep the allocator from fragmenting
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import numpy as np
@@ -122,18 +122,23 @@ def predict(cfg, model, x, anat, device):
     return y[0, :, :s[0], :s[1], :s[2]].float().cpu().numpy()
 
 
-def auto_batch(cfg, model, tracer, vols, protocols, device, scale, resumed=None):
+def auto_batch(cfg, model, tracer, vols, protocols, device, scale, resumed=None, shared=None):
     """Largest batch (8, 16, 32, 64) whose training step fits in 70% of GPU memory; 4 if even 8 does not.
     A size is tried only if doubling the memory of the previous one stays under that limit, because a machine
-    whose GPU shares memory with the system can stall rather than report that it is full. Not on CUDA: 2. An integer batch_size in config.yaml is used as given. A resumed run keeps the batch it
-    started with (`resumed`), so the search runs once per training run. The trial step always includes the path
-    loss, so networks that differ only in the loss end up with the same batch."""
+    whose GPU shares memory with the system can stall rather than report that it is full. Not on CUDA: 2. An
+    integer batch_size in config.yaml is used as given. A resumed run keeps the batch it started with (`resumed`).
+    All runs use one batch: the first run to need it searches with the reference network (`cfg` and `model` of the
+    `path` variant, path loss on, cuDNN autotuning off so timing cannot change the result) and writes it to
+    `shared`; every later run, ablations included, reads it from there."""
     if cfg.batch_size != "auto":
         return int(cfg.batch_size)
     if resumed:
         return int(resumed)
     if device.type != "cuda":
         return 2
+    if shared and shared.exists():
+        return int(load_json(shared)["batch"])
+    bench = torch.backends.cudnn.benchmark; torch.backends.cudnn.benchmark = False
     best, gen = 4, torch.Generator().manual_seed(0)
     lam = cfg.model.lambda_path; cfg.model["lambda_path"] = 1.0
     held = peak = torch.cuda.memory_allocated(device)                # volumes and weights
@@ -151,7 +156,14 @@ def auto_batch(cfg, model, tracer, vols, protocols, device, scale, resumed=None)
             best = b
         except torch.OutOfMemoryError:
             break
-    cfg.model["lambda_path"] = lam; torch.cuda.empty_cache()
+    cfg.model["lambda_path"] = lam; torch.backends.cudnn.benchmark = bench; torch.cuda.empty_cache()
+    if shared:
+        try:                                                     # the first run to finish the search sets it
+            fd = os.open(shared, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            with os.fdopen(fd, "w") as f: f.write(f'{{"batch": {best}}}')
+        except FileExistsError:
+            pass
+        best = int(load_json(shared)["batch"])
     return best
 
 
@@ -160,6 +172,7 @@ def train(cfg, variant="path", seed=0, subjects=None):
     """Train one (variant, seed) into outputs/models/<variant>_s<seed>/ (last.pt, log.json); resumes from last.pt.
     Progress = max(step / (epochs * steps_per_epoch), hours / max_train_hours); it drives the cosine learning rate
     and the path-length curriculum, and training ends at 1. SIGINT/SIGTERM save a checkpoint and exit with 130."""
+    ref_cfg = copy.deepcopy(cfg); apply_variant(ref_cfg, "path")         # the network the batch size is set with
     kind = apply_variant(cfg, variant)
     ddp = "LOCAL_RANK" in os.environ
     rank, world = (int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"])) if ddp else (0, 1)
@@ -170,6 +183,9 @@ def train(cfg, variant="path", seed=0, subjects=None):
         torch.distributed.init_process_group("nccl" if device.type == "cuda" else "gloo")
     else:
         device = get_device()
+    if not cfg.dev_mode and device.type != "cuda":               # days on the CPU instead of hours on the GPU
+        raise SystemExit("the full configuration trains on a CUDA GPU and torch finds none: check nvidia-smi and that "
+                         "the CUDA build of torch is installed (python -c 'import torch; print(torch.cuda.is_available())')")
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = True
@@ -195,7 +211,14 @@ def train(cfg, variant="path", seed=0, subjects=None):
     if cfg.model.compile:
         model = torch.compile(model)
     tracer = PathTracer(cfg.sh_order_out, cfg.model.path.cone_deg, cfg.model.path.sharpen).to(device)
-    B = auto_batch(cfg, model, tracer, tr, protos, device, scale, prev["meta"]["batch"] if prev else None)
+    shared = cfg.P.out / "models" / "batch.json"
+    if prev or cfg.batch_size != "auto" or device.type != "cuda" or shared.exists():
+        B = auto_batch(cfg, model, tracer, tr, protos, device, scale, prev["meta"]["batch"] if prev else None, shared)
+    else:
+        probe = build_model(ref_cfg, "unet").to(device)            # inputs of the reference network (fodrefine differs)
+        pv = tr if ref_cfg.model.input == cfg.model.input else load_volumes(ref_cfg, subjects["train"], protos, device)
+        B = auto_batch(ref_cfg, probe, tracer, pv, protos, device, scale, None, shared)
+        del probe, pv; torch.cuda.empty_cache()
     net = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index] if device.type == "cuda" else None) if ddp else model
     lr0 = cfg.model.lr * world
     opt = torch.optim.AdamW(net.parameters(), lr=lr0, weight_decay=cfg.model.weight_decay)
@@ -204,13 +227,22 @@ def train(cfg, variant="path", seed=0, subjects=None):
     if prev:                                                                    # resume
         model.load_state_dict(prev["model"]); opt.load_state_dict(prev["opt"]); scaler.load_state_dict(prev["scaler"])
         state = prev["state"]
-    gen = torch.Generator().manual_seed(cfg.seed + 1000 * seed + rank + state["step"])
+    # one process: a resumed run continues every random stream where it stopped, so it draws the same patches as a
+    # run never stopped. Several processes (torchrun): only rank 0 saves, so the others restart their streams.
+    gen = torch.Generator().manual_seed(cfg.seed + 1000 * seed + rank + (state["step"] if ddp else 0))
+    if prev and prev.get("rng") and not ddp:
+        r = prev["rng"]
+        gen.set_state(r["gen"]); torch.set_rng_state(r["torch"]); np.random.set_state(r["numpy"]); random.setstate(r["python"])
+        if device.type == "cuda" and r.get("cuda") is not None:
+            torch.cuda.set_rng_state(r["cuda"], device)
     vgen = lambda: torch.Generator().manual_seed(123)
     t0 = last_ck = time.time(); h0 = state["hours"]; pc = cfg.model.path
 
     def save(done=False):
         state["hours"], state["done"] = h0 + (time.time() - t0) / 3600, done
-        atomic(ck, lambda f: torch.save(dict(model=model.state_dict(), opt=opt.state_dict(), scaler=scaler.state_dict(), state=state,
+        rng = dict(gen=gen.get_state(), torch=torch.get_rng_state(), numpy=np.random.get_state(), python=random.getstate(),
+                   cuda=torch.cuda.get_rng_state(device) if device.type == "cuda" else None)
+        atomic(ck, lambda f: torch.save(dict(model=model.state_dict(), opt=opt.state_dict(), scaler=scaler.state_dict(), state=state, rng=rng,
                                              meta=dict(variant=variant, seed=seed, kind=kind, batch=B, world=world, scale=scale, steps=total_steps)), f))
         save_json(state["log"], out / "log.json")
 
@@ -279,7 +311,11 @@ def take_over(lock, owner=True, wait=600):
         h, _, pid = lock.read_text().partition(" ")
         pid = int(pid) if pid.strip().isdigit() else -1
         alive = lambda: _alive(pid)
-        if h == host and pid not in (-1, me) and alive() and os.getpgid(pid) != os.getpgid(0):
+        try:
+            rival = h == host and pid not in (-1, me) and alive() and os.getpgid(pid) != os.getpgid(0)
+        except ProcessLookupError:                               # it exited between the two checks
+            rival = False
+        if rival:
             if owner:
                 print(f"another process ({pid}) is training this run; asking it to save and stop", flush=True)
                 os.kill(pid, signal.SIGINT)

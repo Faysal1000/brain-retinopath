@@ -107,7 +107,8 @@ The main result columns are listed in [08-code.md](08-code.md#result-columns).
 
 ## Troubleshooting
 
-**PyTorch does not see the GPU (Linux).**
+**PyTorch does not see the GPU (Linux).** Full training then stops at once with a message rather than running
+on the CPU.
 `.venv/bin/python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"`
 should print a `+cu130` build, `13.0` and `True`. If the build is `+cpu`:
 

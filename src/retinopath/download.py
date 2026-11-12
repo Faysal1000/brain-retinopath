@@ -1,5 +1,5 @@
 """Resumable downloads: HCP (S3, needs keys in .env), HCP 7T retinotopy results (OSF, open), NSD (S3, open)."""
-import os, shutil, threading, time
+import os, shutil, threading, time, uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import boto3, requests
@@ -68,16 +68,16 @@ def s3_get_many(items, connections, progress=None, on_done=None):
     """Download many objects as PART_BYTES byte ranges through one shared pool of `connections` connections.
     items: (s3, bucket, key, dest, size, etag). A connection that finishes a part takes the next part of any file, so
     none waits for the last, slow parts of another file (per-file pools sit idle then). Each file is written in place
-    into <dest>.<pid>.0.part and renamed when its last part is in. A failed part is retried 10 times (10 s, 20 s, ...
+    into <dest>.<pid>.<call id>.part, a name no other call shares, and renamed when its last part is in. A failed part is retried 10 times (10 s, 20 s, ...
     up to 5 min apart). progress(bytes) as data arrives; on_done((key, size, etag)) when a file is complete.
     Returns the (key, size, etag) rows in the order of `items`."""
     from concurrent.futures import ThreadPoolExecutor, FIRST_EXCEPTION, wait
     stop, lock = threading.Event(), threading.Lock()
     progress = progress or (lambda n: None)
-    left, tmps, tasks = {}, {}, []
+    left, tmps, tasks, call = {}, {}, [], uuid.uuid4().hex[:8]
     for i, (s3, bucket, key, dest, size, etag) in enumerate(items):
         dest = Path(dest); dest.parent.mkdir(parents=True, exist_ok=True)
-        tmps[i] = dest.with_name(f"{dest.name}.{os.getpid()}.0.part")
+        tmps[i] = dest.with_name(f"{dest.name}.{os.getpid()}.{call}.part")
         with open(tmps[i], "wb") as o: o.truncate(size)
         ranges = [(a, min(a + PART_BYTES, size) - 1) for a in range(0, size, PART_BYTES)]
         left[i] = len(ranges)
@@ -113,7 +113,7 @@ def s3_get_many(items, connections, progress=None, on_done=None):
             if stop.wait(min(10 * 2 ** t, 300)): return
         with lock:
             left[i] -= 1; last = left[i] == 0
-        if last:
+        if last and not stop.is_set():                    # a stopped call leaves its file unfinished
             tmps[i].replace(Path(dest)); on_done and on_done((key, size, etag))
 
     ex = ThreadPoolExecutor(connections)
@@ -128,7 +128,7 @@ def s3_get_many(items, connections, progress=None, on_done=None):
 
 
 def remove_stale_parts(root):
-    """Delete the .part files of s3_get left by stopped runs (named <file>.<pid>.<thread>.part, the process gone)."""
+    """Delete the .part files of s3_get and s3_get_many left by stopped runs (<file>.<pid>.<id>.part, the process gone)."""
     for f in Path(root).rglob("*.part"):
         pid = f.name.rsplit(".", 3)[-3] if f.name.count(".") >= 3 else ""
         if pid.isdigit() and not _running(int(pid)):
@@ -242,7 +242,8 @@ def http_get(url, dest, tries=8, timeout=60):
             with open(tmp, "wb") as o:
                 for f, _, _ in ranges:
                     with open(f, "rb") as i: shutil.copyfileobj(i, o, 1 << 24)
-            shutil.rmtree(parts)
+            tmp.replace(dest); shutil.rmtree(parts)             # parts deleted only once the file is in place
+            return dest
     tmp.replace(dest)
     return dest
 

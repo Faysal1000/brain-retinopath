@@ -84,8 +84,8 @@ together otherwise.
 | `s3_exists` | False only for a missing object; wrong keys or network errors raise |
 | `hcp_keys`, `hcp_download` | The files of one HCP session: 3T = diffusion, mask, `aparc+aseg`, white and pial MSMAll surfaces; 7T = the diffusion files |
 | `hcp_figure_keys` | Very inflated MSMAll surfaces of both hemispheres (figures only) |
-| `s3_get_many` | Downloads many objects as 8 MB parts through one shared pool of connections (`--connections`), so no connection waits for the last parts of another file; each file is written in place to `<file>.<pid>.0.part` and renamed when complete; failed parts retried 10 times; Ctrl-C stops all connections |
-| `remove_stale_parts` | Deletes the `<file>.<pid>.<thread>.part` files that `s3_get` left in a stopped run (process no longer running) |
+| `s3_get_many` | Downloads many objects as 8 MB parts through one shared pool of connections (`--connections`), so no connection waits for the last parts of another file; each file is written in place to `<file>.<pid>.<call id>.part` and renamed when complete (never by a stopped call); failed parts retried 10 times; Ctrl-C stops all connections |
+| `remove_stale_parts` | Deletes the `<file>.<pid>.<id>.part` files that `s3_get` or `s3_get_many` left in a stopped run (process no longer running) |
 | `osf_download` | `prfresults.mat` and `atlas.mat` from OSF (`http_get`) |
 | `update_manifest` | Size and ETag of every downloaded file in `data/manifest.json` |
 
@@ -166,7 +166,7 @@ together otherwise.
 | Name | Does |
 |---|---|
 | `VARIANTS`, `apply_variant` | The network variants and their settings |
-| `run_dir` | `outputs/models/<variant>_s<seed>/` |
+| `run_dir` | `outputs/models/<variant>_s<seed>/`; `outputs/models/batch.json` holds the batch size shared by all runs |
 | `load_volumes`, `sample_batch` | Training volumes on the device; random patches with path seeds |
 | `net_in`, `losses` | Network input with or without anatomy; the total loss and its parts |
 | `predict` | Whole-crop inference |

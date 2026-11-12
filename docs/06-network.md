@@ -103,8 +103,11 @@ For each batch element:
 3. Path seeds: 64 of the seed points inside the patch with a 2-voxel margin, drawn with replacement, with their
    inward normals. A patch with no such seed gets dummy seeds marked invalid, which the path loss ignores.
 
-Positions are drawn with a CPU generator seeded from `seed`, the training seed, the process rank and the step at
-which the process started, so runs are reproducible and a resumed run does not repeat the batches it has seen.
+Positions are drawn with a CPU generator seeded from `seed`, the training seed and the process rank. Every
+checkpoint also stores the state of this generator and of the torch (CPU and CUDA), NumPy and Python random
+streams, and a resumed run restores them, so a run that was stopped and resumed draws the same batches and ends
+with the same weights as one that never stopped. With several processes (torchrun) only rank 0 saves; the other
+ranks restart their generators at the step the run resumes from.
 
 ## Training loop (`train.train`)
 
@@ -120,8 +123,11 @@ which the process started, so runs are reproducible and a resumed run does not r
   32, 64 are tried with one forward and backward pass including the path loss at full length; the largest whose
   peak memory stays under 70% of the device memory is kept (4 if 8 does not fit). A size is not tried if twice the
   working memory of the previous size would exceed the limit, because a GPU that shares memory with the system can
-  stall rather than fail on an oversized trial. The trial always includes the path loss, so `path` and `voxel` get
-  the same batch. The size is stored in the checkpoint and reused on resume. On MPS and CPU `auto` means 2.
+  stall rather than fail on an oversized trial. The search runs once, in the first training run, with the `path`
+  network and its inputs (path loss on, cuDNN autotuning off), and is written to `outputs/models/batch.json`;
+  every other run, ablations included, uses that size, so all methods train with the same batch. Delete the file
+  (and the runs) to search again. The size is also stored in the checkpoint and reused on resume. On MPS and CPU
+  `auto` means 2.
 - **Validation.** Every `steps_per_epoch` (500) steps, 8 batches from the validation subjects with a fixed
   generator, scored with the voxel loss and the full-length accumulated path error for every variant, so all
   variants are compared on the same numbers. One row goes to `log.json`, and a line with step, percentage done, hours
