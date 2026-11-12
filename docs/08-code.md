@@ -11,8 +11,9 @@ file the code writes.
 | `notebooks/00`–`10` | The experiment (below) |
 | `scripts/setup.sh` | Creates `.venv` (Python 3.12–3.13), installs the pinned packages (CUDA 13 PyTorch on Linux), installs the package, registers the `retinopath` Jupyter kernel, runs a 3D convolution on the device |
 | `scripts/download_data.sh` | `python -m retinopath.pipeline` for `full` or `dev`; `WORKERS` sets the number of parallel downloads |
-| `scripts/run_all.sh` | Runs the download step in the terminal (live progress bars; `WORKERS` as above), then notebooks 00–10 in order. Each is copied to `outputs/executed/` with `DEV_MODE` set and executed there, so `notebooks/` stays clean |
-| `scripts/run_notebook.sh` | Executes one notebook in place, with the `DEV_MODE` saved in it |
+| `scripts/run_all.sh` | Runs the download step (`WORKERS` as above), then notebooks 00–10 in order through `run_notebook.py` with `DEV_MODE` set |
+| `scripts/run_notebook.py` | Executes a notebook without a browser into a copy (`outputs/executed/`), printing its output live; tqdm bars are drawn as text |
+| `scripts/run_notebook.sh` | One notebook through `run_notebook.py`, with the `DEV_MODE` saved in it |
 | `requirements.txt` | Pinned packages for macOS, including PyTorch |
 | `requirements-dgx.txt` | The same pins for Linux with CUDA; PyTorch comes from the CUDA 13 wheel index |
 | `pyproject.toml` | Installs `src/retinopath` as an editable package, with `assets/` |

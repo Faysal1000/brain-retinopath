@@ -59,7 +59,8 @@ in [docs/08-code.md](docs/08-code.md).
 - Style: ordinary research code. Short docstrings that say what a function returns and why a choice was made;
   comments only where the code does not explain itself. No status notes, to-do lists, "not implemented" remarks
   or schedules in code, comments, docs or `config.yaml`.
-- Keep notebooks free of outputs. Executed copies go to `outputs/executed/` through `scripts/run_all.sh`.
+- Keep notebooks free of outputs. Executed copies go to `outputs/executed/` through `scripts/run_all.sh`
+  or `scripts/run_notebook.sh`.
 - Do not commit or push unless asked.
 
 ## Checking a change

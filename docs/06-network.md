@@ -124,7 +124,8 @@ which the process started, so runs are reproducible and a resumed run does not r
   the same batch. The size is stored in the checkpoint and reused on resume. On MPS and CPU `auto` means 2.
 - **Validation.** Every `steps_per_epoch` (500) steps, 8 batches from the validation subjects with a fixed
   generator, scored with the voxel loss and the full-length accumulated path error for every variant, so all
-  variants are compared on the same numbers. One row goes to `log.json` and to `outputs/logs/<run>.log`.
+  variants are compared on the same numbers. One row goes to `log.json`, and a line with step, percentage done, hours
+  done and left, losses and GPU memory to `outputs/logs/<run>.log`.
 - **Checkpoint.** `last.pt` holds the model, optimiser and scaler states, `state` (step, hours, log, `done`) and
   `meta` (variant, seed, kind, batch, world size, scale, total steps). Written every `ckpt_minutes` (15), on
   SIGINT or SIGTERM (the run then exits with code 130) and at the end with `done` set. A finished run is skipped.
@@ -146,7 +147,8 @@ which the process started, so runs are reproducible and a resumed run does not r
 `train_commands` lists one `python -m retinopath.train --variant V --seed S [--dev]` per run. `run_jobs` spreads
 them over slots = nodes × GPUs (one slot on a machine without CUDA). Each slot runs its jobs one after another,
 with `CUDA_VISIBLE_DEVICES` set to its GPU and, for a remote node, through SSH (same project path on every
-node, shared `data/` and `outputs/`). Each run's output goes to `outputs/logs/<run>.log`, and the exit code is
+node, shared `data/` and `outputs/`). Each run's output goes to `outputs/logs/<run>.log` and, prefixed with the run name, to the notebook
+as it is written (so `run_all.sh` shows it live); the exit code is
 reported (0 finished, 130 stopped with a checkpoint). With `multi_gpu: ddp` on one machine there is one slot and
 every run uses all GPUs through `torchrun`. A notebook interrupt sends SIGINT to every local run, waits up to two
 minutes for each to save, and stops.

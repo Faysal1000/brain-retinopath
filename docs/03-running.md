@@ -42,16 +42,19 @@ bash scripts/download_data.sh [dev]      # all data for the chosen configuration
 bash scripts/run_all.sh dev|full         # notebooks 00 to 10 in order
 ```
 
-`run_all.sh` first runs the download step itself, so its progress bars (files checked, then gigabytes downloaded
-with speed and time left) show in the terminal; after `download_data.sh` this only checks the files. It then copies each notebook to `outputs/executed/`, sets `DEV_MODE` there and executes it, so the notebooks
-in `notebooks/` stay clean. To work interactively instead:
+`run_all.sh` first runs the download step (files checked, then gigabytes downloaded with speed and time left);
+after `download_data.sh` this only checks the files. It then runs each notebook through `scripts/run_notebook.py`,
+which executes a copy in `outputs/executed/` with `DEV_MODE` set, so the notebooks in `notebooks/` stay clean, and
+prints the output live: a `--- cell k/n` line as each cell starts, progress bars, and for training one line per run
+and epoch, prefixed with the run name (`[path_s0] step 1000/40000 (2%) | 0.31 h done, 12.1 h left | ...`). To work interactively instead:
 
 ```bash
 .venv/bin/jupyter lab --no-browser --ip 0.0.0.0 --port 8888
 ```
 
 Open the notebooks in order, choose the `retinopath` kernel and set `DEV_MODE` in the first cell.
-A single notebook can be executed with `bash scripts/run_notebook.sh 03_retinotopy_metric`.
+A single notebook, with the `DEV_MODE` saved in it and the same live output: `bash scripts/run_notebook.sh 03_retinotopy_metric`
+(the executed copy goes to `outputs/executed/`).
 
 On a remote machine, start long runs inside `tmux` (`tmux new -s run`; detach with Ctrl-b d; return with
 `tmux attach -t run`).
@@ -89,8 +92,8 @@ The main result columns are listed in [08-code.md](08-code.md#result-columns).
 ## GPUs and nodes
 
 - **One GPU.** Training keeps all volumes on the GPU, uses mixed precision and, with `batch_size: auto`, the
-  largest batch that fits (up to 64). Each epoch's line in `outputs/logs/<run>.log` gives the hours left for that
-  run and the peak GPU memory (`gpu_gb`, and `gpu_reserved_gb` held by PyTorch). Work per run grows with
+  largest batch that fits (up to 64). Each epoch's line (in the terminal and in `outputs/logs/<run>.log`) gives the hours left for
+  that run and the peak GPU memory (`gpu_gb`, and `gpu_reserved_gb` held by PyTorch). Work per run grows with
   `batch_size × epochs × steps_per_epoch`, so a fixed smaller `batch_size` or fewer `epochs` shortens training;
   use the same values for every network. fODF fitting uses all CPU cores but one (`n_jobs`); tracking and scoring run one
   session per core.

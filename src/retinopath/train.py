@@ -258,7 +258,9 @@ def train(cfg, variant="path", seed=0, subjects=None):
             if device.type == "cuda":                            # peak since the last row; reserved far above used = fragmentation
                 row["gpu_gb"], row["gpu_reserved_gb"] = (round(x / 2 ** 30, 1) for x in (torch.cuda.max_memory_allocated(device), torch.cuda.memory_reserved(device)))
                 torch.cuda.reset_peak_memory_stats(device)
-            state["log"].append(row); print(row, flush=True)
+            state["log"].append(row)
+            print(f"step {state['step']}/{total_steps} ({100 * state['step'] / total_steps:.0f}%) | {hours:.2f} h done, "
+                  f"{row['hours_left']} h left | " + " ".join(f"{k} {v:.4g}" for k, v in row.items() if k.startswith(("train_", "val_", "gpu_"))), flush=True)
         if rank == 0 and time.time() - last_ck > cfg.model.ckpt_minutes * 60:
             save(); last_ck = time.time()
     if rank == 0:

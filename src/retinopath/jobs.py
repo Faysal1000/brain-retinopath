@@ -42,9 +42,15 @@ def run_jobs(cfg, jobs):
                     env["CUDA_VISIBLE_DEVICES"] = str(gpu)
                 if node:      # same project path on every node, passwordless SSH
                     cmd = ["ssh", node, f"cd {ROOT} && CUDA_VISIBLE_DEVICES={gpu} " + " ".join(cmd)]
+            print(f"{name}: started (run {jobs.index((name, args)) + 1} of {len(jobs)}), log in {logs / (name + '.log')}", flush=True)
+            # every line goes to the log file and, prefixed with the run name, to the notebook (or terminal)
             with open(logs / f"{name}.log", "a") as f:
-                p = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
-                procs.append(p); rc = p.wait()
+                p = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     start_new_session=True, text=True, bufsize=1)
+                procs.append(p)
+                for line in p.stdout:
+                    f.write(line); f.flush(); print(f"[{name}] {line}", end="", flush=True)
+                rc = p.wait()
             res.append((name, rc))                       # rc 130: train.py saved a checkpoint after SIGINT/SIGTERM
             print(f"{name}: {'ok' if rc == 0 else 'stopped, checkpoint saved' if rc == 130 else 'FAILED, see ' + str(logs / (name + '.log'))}", flush=True)
         return res
