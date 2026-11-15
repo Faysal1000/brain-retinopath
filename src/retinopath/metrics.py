@@ -37,9 +37,30 @@ def build_graph(anat):
     return g.maximum(g.T)
 
 
+class Geodesic:
+    """Surface distances between V1-V3 vertices of one session. The distances from a vertex are computed the first
+    time it is asked for and kept, so every tractogram of the session after the first reuses them."""
+
+    def __init__(self, anat):
+        self.anat, self.graph, self.rows = anat, None, {}
+        self.roi = np.flatnonzero(anat["area"] > 0)
+        self.pos = np.full(len(anat["verts"]), -1); self.pos[self.roi] = np.arange(len(self.roi))
+
+    def table(self, src, cand):
+        """(len(src), len(cand)) distances in mm; src and cand are V1-V3 vertex indices."""
+        new = [int(v) for v in np.unique(src) if int(v) not in self.rows]
+        if new:
+            if self.graph is None:
+                self.graph = build_graph(self.anat)
+            for v, r in zip(new, dijkstra(self.graph, directed=False, indices=new)):
+                self.rows[v] = r[self.roi]
+        return np.stack([self.rows[int(v)] for v in src])[:, self.pos[cand]]
+
+
 def null_error(anat, key, a, b, cfg, rng, graph=None, chunk=2000):
     """Surrogate errors: endpoint a stays, endpoint b moves to a random valid vertex of the same area and hemisphere
-    lying at (nearly) the same distance from a. Distance is straight-line, or along the surface if `graph` is given.
+    lying at (nearly) the same distance from a. Distance is straight-line, or along the surface if `graph` (a
+    Geodesic) is given.
     A candidate matches when |d - d_obs| <= max(null_tol * d_obs, null_tol_min_mm); n_null of the matches are drawn
     uniformly without replacement (random scores, smallest k kept).
     Returns three (n, n_null) arrays (ree, dlog, dang); rows with fewer than n_null matches, or whose b is not a
@@ -61,7 +82,7 @@ def null_error(anat, key, a, b, cfg, rng, graph=None, chunk=2000):
                 D = cdist(anat["verts"][a[rows]], anat["verts"][cand])
             else:
                 ua, inv = np.unique(a[rows], return_inverse=True)
-                D = dijkstra(graph, directed=False, indices=ua)[:, cand][inv]
+                D = graph.table(ua, cand)[inv]
             d_obs = D[np.arange(len(rows)), pos[b[rows]]]
             tol = np.maximum(cfg.prf.null_tol * d_obs, cfg.prf.null_tol_min_mm)
             score = np.where(np.abs(D - d_obs[:, None]) <= tol[:, None], rng.random(D.shape), np.inf)
@@ -83,7 +104,7 @@ def rsi(obs, null):
 
 def retinotopic_scores(anat, a, b, pair, cfg, key=None, graph=None, seed=0):
     """All per-subject functional scores for one tractogram (end vertices a, b; pair codes 12/23/13). Only streamlines
-    with both ends valid in `key` are scored. graph: None, True (build it here) or a build_graph result; adds the
+    with both ends valid in `key` are scored. graph: None, True (made here) or a Geodesic of this session; adds the
     geodesic-null RSI. Returns a flat dict."""
     key = key or get_key(anat, cfg)
     rng = np.random.default_rng(seed)
@@ -92,7 +113,7 @@ def retinotopic_scores(anat, a, b, pair, cfg, key=None, graph=None, seed=0):
     obs = endpoint_error(key, a, b)
     nul = null_error(anat, key, a, b, cfg, rng)
     if graph is True:
-        graph = build_graph(anat)
+        graph = Geodesic(anat)
     nul_g = null_error(anat, key, a, b, cfg, rng, graph) if graph is not None else None
     out = dict(n_valid=int(len(a)))
     for code, name in list(PAIRS.items()) + [(0, "all")]:

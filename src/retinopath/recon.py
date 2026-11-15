@@ -103,27 +103,38 @@ def solve_qp_batch(X, C, S, iters=1000, rho=None, device="cpu"):
         x = (X's + rho C'(z - u)) (X'X + rho C'C)^-1,   z = max(C x + u, 0),   u = u + C x - z
     with the inverse computed once. Fixed number of iterations, no convergence test. rho defaults to
     tr(X'X) / tr(C'C). Rows are processed in chunks of 50,000. NumPy float64 on the CPU (torch CPU maths is
-    avoided because it segfaults on macOS after dipy's OpenMP code), torch float64 on CUDA."""
+    avoided because it segfaults on macOS after dipy's OpenMP code), torch float64 on CUDA (_admm_torch)."""
     X, C = np.asarray(X, np.float64), np.asarray(C, np.float64)
     P = X.T @ X
     rho = rho or float(np.trace(P) / np.trace(C.T @ C))
     Minv = np.linalg.inv(P + rho * C.T @ C)
     if str(device).startswith("cuda"):
-        import torch
-        to = lambda a: torch.as_tensor(a, dtype=torch.float64, device=device)
-        X, C, Minv, xp = to(X), to(C), to(Minv), torch
-        relu, zeros, back = (lambda a: torch.clamp(a, min=0)), (lambda n: torch.zeros(n, C.shape[0], dtype=torch.float64, device=device)), (lambda a: a.float().cpu().numpy())
-    else:
-        to, relu, zeros, back = (lambda a: np.asarray(a, np.float64)), (lambda a: np.maximum(a, 0)), (lambda n: np.zeros((n, C.shape[0]))), (lambda a: a.astype(np.float32))
+        return np.concatenate([_admm_torch(S[i:i + 50_000], X, C, Minv, rho, iters, device) for i in range(0, len(S), 50_000)])
     out = []
     for i in range(0, len(S), 50_000):
-        s = to(S[i:i + 50_000]); q = s @ X; z = zeros(len(s)); u = zeros(len(s))
+        s = np.asarray(S[i:i + 50_000], np.float64); q = s @ X; z = np.zeros((len(s), C.shape[0])); u = np.zeros((len(s), C.shape[0]))
         for _ in range(iters):
             x = (q + rho * (z - u) @ C) @ Minv
             cx = x @ C.T
-            z = relu(cx + u); u = u + cx - z
-        out.append(back(x))
+            z = np.maximum(cx + u, 0); u = u + cx - z
+        out.append(x.astype(np.float32))
     return np.concatenate(out)
+
+
+def _admm_torch(S, X, C, Minv, rho, iters, device):
+    """The iterations of solve_qp_batch for one chunk of rows, in torch float64, without a new array per step.
+    With t = C x + u the updates are u = min(t, 0) and z - u = |t|, exactly; v holds rho (z - u)."""
+    import torch
+    to = lambda a: torch.as_tensor(np.asarray(a), dtype=torch.float64, device=device)
+    X, C, Minv = to(X), to(C), to(Minv); Ct = C.T.contiguous()
+    q = to(S) @ X
+    v, u, t = (torch.zeros(len(q), C.shape[0], dtype=torch.float64, device=device) for _ in range(3))
+    for _ in range(iters):
+        x = (q + v @ C) @ Minv
+        torch.matmul(x, Ct, out=t); t.add_(u)
+        torch.clamp(t, max=0, out=u); t.abs_().mul_(rho)
+        v, t = t, v
+    return x.float().cpu().numpy()
 
 
 def fit_msmt(p, mask, jobs=1, order=8, device="cpu", use_dipy=False):

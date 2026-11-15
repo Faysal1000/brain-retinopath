@@ -42,7 +42,8 @@ A deterministic tracker whose positions are differentiable with respect to the f
 indices of the patch.
 
 1. **Amplitudes** (`amps`). The fODF is sampled trilinearly at each point (`sample_trilinear`, written with
-   `gather` so it runs on CUDA, MPS and CPU; points outside the volume are clamped to the border) and evaluated on
+   `gather` so it runs on CUDA, MPS and CPU, one call for the eight corners; points outside the volume are
+   clamped to the border) and evaluated on
    the 362 directions of `symmetric362`. Negative amplitudes are set to 0.
 2. **Start direction** (`start_dirs`). The sphere direction maximising amplitude × relu(cos to the inward
    normal)². A hard choice, taken from the reference fODF and shared by the predicted and the reference path.
@@ -105,8 +106,11 @@ For each batch element:
 
 Positions are drawn with a CPU generator seeded from `seed`, the training seed and the process rank. Every
 checkpoint also stores the state of this generator and of the torch (CPU and CUDA), NumPy and Python random
-streams, and a resumed run restores them, so a run that was stopped and resumed draws the same batches and ends
-with the same weights as one that never stopped. With several processes (torchrun) only rank 0 saves; the other
+streams, and a resumed run restores them, so a run that was stopped and resumed draws the same batches as one
+that never stopped. On the CPU and MPS it also ends with the same weights; on CUDA the weights agree closely but
+not bit for bit, because cuDNN chooses its convolution algorithms by timing and some backward passes add in an
+order that is not fixed. The streams are also set again after the batch size is known, so the run that searches
+it starts like every other run. With several processes (torchrun) only rank 0 saves; the other
 ranks restart their generators at the step the run resumes from.
 
 ## Training loop (`train.train`)

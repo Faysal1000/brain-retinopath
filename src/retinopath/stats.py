@@ -34,11 +34,12 @@ def bootstrap_ci(d, fn=np.median, n=10000, seed=0, alpha=0.05):
 
 def paired_test(x, y=None, alternative="two-sided", shift=0.0, n_boot=10000):
     """Wilcoxon signed-rank test of x - y (or of x against 0), with effect sizes and a bootstrap interval.
-    `shift` is added to the differences (non-inferiority margin). Too few subjects -> p = NaN, never an error."""
-    x, y = _clean(x, y); d = (x - y if y is not None else x) + shift
-    out = dict(n=int(len(d)), median=float(np.median(d)) if len(d) else np.nan, hodges_lehmann=hodges_lehmann(d),
+    `shift` is added to the differences for the test (non-inferiority margin); median, Hodges-Lehmann estimate and
+    interval describe the differences themselves. Too few subjects -> p = NaN, never an error."""
+    x, y = _clean(x, y); d0 = x - y if y is not None else x; d = d0 + shift
+    out = dict(n=int(len(d)), median=float(np.median(d0)) if len(d) else np.nan, hodges_lehmann=hodges_lehmann(d0),
                rank_biserial=rank_biserial(d), p=np.nan)
-    out["ci_lo"], out["ci_hi"] = bootstrap_ci(d, n=n_boot)
+    out["ci_lo"], out["ci_hi"] = bootstrap_ci(d0, n=n_boot)
     if len(d) >= 6 and np.any(d != 0):
         out["p"] = float(stats.wilcoxon(d, alternative=alternative).pvalue)
     return out

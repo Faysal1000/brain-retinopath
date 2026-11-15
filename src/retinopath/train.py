@@ -219,6 +219,7 @@ def train(cfg, variant="path", seed=0, subjects=None):
         pv = tr if ref_cfg.model.input == cfg.model.input else load_volumes(ref_cfg, subjects["train"], protos, device)
         B = auto_batch(ref_cfg, probe, tracer, pv, protos, device, scale, None, shared)
         del probe, pv; torch.cuda.empty_cache()
+    seed_all(cfg.seed + 1000 * seed + rank)                    # the batch search draws random numbers; start every run alike
     net = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index] if device.type == "cuda" else None) if ddp else model
     lr0 = cfg.model.lr * world
     opt = torch.optim.AdamW(net.parameters(), lr=lr0, weight_decay=cfg.model.weight_decay)

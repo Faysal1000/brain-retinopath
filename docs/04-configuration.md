@@ -29,7 +29,7 @@ The chosen block is merged over the top-level keys. Both blocks hold the same ke
 | `seeds_per_vertex` | Tractography seeds per V1–V3 vertex | 10 | none | More streamlines, linear tracking time |
 | `n_null` | Surrogates per streamline | 100 | none; below 20 is noisy | Smoother null, linear time and memory |
 | `n_jobs` | CPU workers for the per-session steps | -2 (all cores but one) | a number, or negative to count back from all cores | Faster; about 2 GB of memory per worker |
-| `gpu_jobs` | Sessions at once in the GPU steps outside training (reference fODF, inference) | 4 | 1 or more | File reading and writing overlap with GPU work; results do not depend on it |
+| `gpu_jobs` | Sessions at once in network inference (notebooks 06, 07) | 4 | 1 or more | File reading and writing overlap with GPU work; results do not depend on it |
 | `run_protocols` | Protocols evaluated | 9 | names under `protocols` | One more column of the grid |
 
 Every run trains the same 30,000 steps. Each log row in `outputs/models/<run>/log.json` carries the hours so far,

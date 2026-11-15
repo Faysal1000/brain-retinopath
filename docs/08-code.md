@@ -141,7 +141,7 @@ together otherwise.
 | `signal_sh` | Per-shell SH of the normalised signal (network input) |
 | `gtab_of` | DIPY gradient table of a protocol |
 | `fit_csd` | Single-shell CSD |
-| `solve_qp_batch` | Batched ADMM for the constrained least-squares fit |
+| `solve_qp_batch`, `_admm_torch` | Batched ADMM for the constrained least-squares fit; its iterations on CUDA, in place |
 | `fit_msmt` | Multi-shell multi-tissue CSD |
 | `fit_rumba` | RUMBA-SD, converted to SH |
 | `pad_order` | Zero-pads a lower-order SH volume |
@@ -201,7 +201,7 @@ together otherwise.
 | `PAIRS` | Pair codes 12, 23, 13 and their names |
 | `get_key` | Visual-field position and validity of every vertex |
 | `endpoint_error` | Visual-field, eccentricity and angle error per streamline |
-| `build_graph` | Surface mesh graph for geodesic distances |
+| `build_graph`, `Geodesic` | Surface mesh graph; surface distances between V1–V3 vertices, kept per session |
 | `null_error` | Distance-matched surrogate errors |
 | `rsi` | Retinotopic specificity index |
 | `retinotopic_scores` | All retinotopic scores of one tractogram |
@@ -217,12 +217,12 @@ together otherwise.
 | `CLASSICAL`, `split_method` | Method name → fODF fit and tracker |
 | `session`, `cfg_for`, `sdir` | Session description, NSD settings, cache folder |
 | `each` | Runs a function over sessions, one per worker process (`n_jobs`, limited by free memory); the bar counts finished sessions |
-| `prepare`, `prepare_all` | Download if needed and cache the crop; all sessions in parallel |
+| `prepare`, `prepare_all` | Download if needed and cache the crop; all sessions in parallel (7T after the others) |
 | `load_anat`, `load_dwi` | Read the cached crop |
 | `group_key_source` | Group-average key on a session's vertices |
 | `protocol` | A simulated protocol, or the scan as acquired (`NATIVE`) |
 | `anat_channels`, `net_input`, `inputs_for`, `net_inputs_all` | Anatomical channels; cached network input; inputs of given sessions and protocols in parallel; all training inputs in parallel |
-| `fodf`, `fodf_all`, `save_fodf`, `on_ref_grid` | Cached fODF; the same for all sessions (one per core, or `gpu_jobs` at a time on a GPU); resampling to the crop grid |
+| `fodf`, `fodf_all`, `save_fodf`, `on_ref_grid` | Cached fODF; the same for all sessions (one per core; multi-shell CSD on a GPU one after another); resampling to the crop grid |
 | `tract`, `proximity_tract`, `streamlines_of` | Cached tractogram; proximity bound; streamlines from a stored tractogram |
 | `scores` | Cached result row |
 | `retest_scores` | Reproducibility between two scans |
@@ -264,7 +264,7 @@ flowchart LR
 - **`run_grid`.** One session per joblib worker (`each`): the worker fits the missing fODFs, tracks and scores,
   each on one core. When a GPU `device` is passed, the missing fODFs are fitted first with `fodf_all`. Each
   worker loads the anatomy once and builds the group-average key, the atlas key and the
-  surface graph for all combinations of its session.
+  surface distances (`metrics.Geodesic`) for all combinations of its session.
 - **`cfg_for`.** NSD sessions use `nsd.seeds_per_vertex` and `nsd.ecc_max`.
 - **`keep_raw: false`.** `prepare` deletes a subject's raw HCP diffusion folder once its crop is cached.
 

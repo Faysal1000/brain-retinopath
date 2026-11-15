@@ -65,7 +65,8 @@ Only streamlines with both ends valid in the key are scored.
   vertices of the same area and hemisphere as `b` whose distance from `a` matches the real distance d within
   max(`null_tol` × d, `null_tol_min_mm`) (10%, at least 1 mm). The matches are drawn uniformly without
   replacement. Distance is straight-line, or for the geodesic version along the white surface (Dijkstra on the
-  mesh graph of edge lengths, `build_graph`). A streamline with fewer than `n_null` matches gets NaN.
+  mesh graph of edge lengths, `build_graph`; `Geodesic` keeps the distances from each vertex, so all tractograms
+  of a session share them). A streamline with fewer than `n_null` matches gets NaN.
 - **RSI** (`rsi`): `1 − median(observed error) / median(null error)` over the streamlines that have a full null;
   NaN with fewer than 20. 0 means the tractogram is no more retinotopic than distance alone predicts; 1 means
   every streamline joins points with the same visual-field position.
@@ -119,7 +120,8 @@ test.
   least 6 subjects and a non-zero difference, otherwise p is NaN), with the median difference, the
   Hodges–Lehmann pseudo-median (median of all pairwise averages), the rank-biserial correlation, and a percentile
   bootstrap interval of the median (`stats.n_boot` resamples, 1,000 in dev). `shift` is added to the
-  differences, which turns the test into a non-inferiority test.
+  differences for the test only, which turns it into a non-inferiority test; the median, the pseudo-median and
+  the interval describe the differences themselves.
 - `correct`: Holm for the confirmatory family, Benjamini–Hochberg FDR for the exploratory grid.
 - `mixed_model`: linear mixed model `rsi ~ C(method, Treatment('csd')) + C(protocol)` with a random intercept per
   subject, method effects relative to classical CSD.

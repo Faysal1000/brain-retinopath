@@ -83,19 +83,22 @@ def build_model(cfg, kind="unet"):
 # ------------------------------------------------------------------------------------------------ propagator
 def sample_trilinear(vol, pts):
     """vol: (B, C, X, Y, Z); pts: (B, S, 3) in voxel index units. Returns (B, S, C). Differentiable in vol and pts.
-    Points outside the volume are clamped to the border. Written with gather so it runs on CUDA, MPS and CPU."""
+    Points outside the volume are clamped to the border. Written with gather so it runs on CUDA, MPS and CPU. The
+    eight corners are read with one gather: its backward pass makes a gradient the size of `vol`, and one per corner
+    and tracking step was most of the cost of the path loss."""
     B, C, X, Y, Z = vol.shape
     size = torch.tensor([X, Y, Z], device=vol.device, dtype=pts.dtype)
     p = torch.minimum(torch.clamp(pts, min=0), size - 1.001)
     i0 = p.floor().long(); f = p - i0
-    flat = vol.reshape(B, C, -1)
+    off = torch.tensor([[dx, dy, dz] for dx in (0, 1) for dy in (0, 1) for dz in (0, 1)], device=vol.device)   # (8, 3)
+    ii = i0[:, None] + off[None, :, None]                                                    # (B, 8, S, 3)
+    idx = (ii[..., 0] * Y + ii[..., 1]) * Z + ii[..., 2]                                     # (B, 8, S)
+    w = torch.where(off[None, :, None].bool(), f[:, None], 1 - f[:, None])
+    w = w[..., 0] * w[..., 1] * w[..., 2]                                                    # (B, 8, S)
+    g = torch.gather(vol.reshape(B, C, -1), 2, idx.reshape(B, 1, -1).expand(-1, C, -1)).reshape(B, C, 8, -1)
     out = 0
-    for dx in (0, 1):
-        for dy in (0, 1):
-            for dz in (0, 1):
-                idx = ((i0[..., 0] + dx) * Y + (i0[..., 1] + dy)) * Z + (i0[..., 2] + dz)          # (B, S)
-                w = (f[..., 0] if dx else 1 - f[..., 0]) * (f[..., 1] if dy else 1 - f[..., 1]) * (f[..., 2] if dz else 1 - f[..., 2])
-                out = out + torch.gather(flat, 2, idx[:, None].expand(-1, C, -1)) * w[:, None]
+    for k in range(8):
+        out = out + g[:, :, k] * w[:, None, k]
     return out.transpose(1, 2)
 
 

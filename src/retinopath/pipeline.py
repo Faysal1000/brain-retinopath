@@ -47,21 +47,25 @@ def sdir(cfg, ses):
 
 
 # ---------------------------------------------------------------- one session per core
-def each(cfg, fn, items, desc=None, gb=2.0, jobs=None):
+def each(cfg, fn, items, desc=None, gb=2.0):
     """[fn(cfg, item) for item in items], one item per worker process: reading a scan, simulating a protocol,
     tracking and scoring are single-threaded. The workers share cfg.n_jobs cores: with fewer items than cores, or
-    less than `gb` GB of free memory per worker, each worker gets the spare cores for its own fits. jobs: upper
-    limit on the workers (work that shares the GPU). The progress bar counts finished items."""
+    less than `gb` GB of free memory per worker, each worker gets the spare cores for its own fits. The progress
+    bar counts finished items."""
     import psutil
     from joblib import Parallel, delayed
     from tqdm.auto import tqdm
     items = list(items); total = n_jobs(cfg)
     if not items:
         return []
-    n = max(1, min(jobs or total, total, len(items), int(psutil.virtual_memory().available / 2**30 / gb)))
+    n = max(1, min(total, len(items), int(psutil.virtual_memory().available / 2**30 / gb)))
     one = copy.deepcopy(cfg); one["n_jobs"] = max(1, total // n)
-    out = Parallel(n_jobs=n, return_as="generator")(delayed(fn)(one, x) for x in items)
-    return list(tqdm(out, total=len(items), desc=desc))
+    run = lambda i, x: (i, fn(one, x))
+    out = [None] * len(items)
+    for i, r in tqdm(Parallel(n_jobs=n, return_as="generator_unordered")(delayed(run)(i, x) for i, x in enumerate(items)),
+                     total=len(items), desc=desc):
+        out[i] = r
+    return out
 
 
 # ---------------------------------------------------------------- crop
@@ -93,8 +97,10 @@ def prepare(cfg, ses, s3=None):
 
 
 def prepare_all(cfg, sessions, desc="crops"):
-    """prepare() for every session, in parallel: unpacking a scan takes one core for several seconds."""
-    each(cfg, prepare, sessions, desc)
+    """prepare() for every session, in parallel: unpacking a scan takes one core for several seconds. 7T sessions
+    come after the others, because a 7T crop uses the anatomy files its 3T session may still be fetching."""
+    each(cfg, prepare, [s for s in sessions if s["kind"] != "7T"], desc)
+    each(cfg, prepare, [s for s in sessions if s["kind"] == "7T"], f"{desc} (7T)")
 
 
 def load_anat(cfg, ses):
@@ -201,12 +207,18 @@ def _fodf_file(cfg, job):
 
 
 def fodf_all(cfg, sessions, name, method, device="cpu", desc="fODF"):
-    """fodf() for every session. On the CPU one session per core; on a GPU cfg.gpu_jobs sessions at a time, so that
-    loading, response functions and saving of one session overlap with the GPU fit of another."""
-    gpu = str(device) != "cpu"
+    """fodf() for every session. Only multi-shell CSD is solved on the GPU: with a GPU `device` those fits run one
+    after another in this process, because the solver keeps the GPU busy by itself and several at once only take
+    turns. Every other fit runs on the CPU, one session per core."""
+    recon = cfg.ref_model if method == "msmt_csd" else CLASSICAL.get(method.split("_")[0], "msmt_csd")
+    gpu = str(device) != "cpu" and recon == "msmt_csd" and (name == "NATIVE" or len(cfg.protocols[name]["shells"]) > 1)
     todo = [s for s in sessions if not (sdir(cfg, s) / f"fodf_{name}_{method}.npz").exists()]
-    each(cfg, _fodf_file, [(s, name, method, str(device)) for s in todo], desc, gb=4.0 if gpu else 2.0,
-         jobs=cfg.gpu_jobs if gpu else None)
+    if gpu:
+        from tqdm.auto import tqdm
+        for ses in tqdm(todo, desc=desc):
+            fodf(cfg, ses, name, method, device)
+    else:
+        each(cfg, _fodf_file, [(s, name, method, "cpu") for s in todo], desc)
 
 
 def save_fodf(cfg, ses, name, method, sh, affine, pve):
@@ -374,7 +386,7 @@ def robustness_rows(cfg, ses, variants):
 def _grid_rows(cfg, ses, combos, kw):
     anat = load_anat(cfg, ses)
     keyed = "prf_ang" in anat
-    graph = True if keyed else None                              # True: built only when a score is not cached
+    graph = M.Geodesic(anat) if keyed else None                  # surface distances, shared by all combinations
     group = group_key_source(cfg, anat) if keyed else None
     atlas = atlas_key_source(cfg, anat, ses) if keyed else None
     return [scores(cfg, ses, p, m, anat=anat, graph=graph, group=group, atlas=atlas, **kw) for p, m in combos]
@@ -389,6 +401,10 @@ def run_grid(cfg, sessions, combos, name, device="cpu", **kw):
         for proto, base in dict.fromkeys((p, split_method(m)[0]) for p, m in combos):
             if base != "proximity" and not base.startswith("net_"):
                 fodf_all(cfg, sessions, proto, base, device, f"{name}: fODF {proto} {base}")
+    for h in cfg.hemis:                                          # atlas files: fetched here, not by every worker
+        atlas_files(cfg, h)
+        if any(not s["kind"].startswith("nsd") for s in sessions):
+            nsd.bridge_file(cfg, h)
     rows = each(cfg, lambda c, s: _grid_rows(c, s, combos, kw), sessions, name)
     df = pd.DataFrame([r for rs in rows for r in rs]); out = cfg.P.out / "results"; out.mkdir(exist_ok=True)
     df.to_csv(out / f"{name}.csv", index=False); return df
