@@ -156,7 +156,7 @@ together otherwise.
 | `VoxelMLP` | Per-voxel network |
 | `FODRefine` | Residual fODF-to-fODF network |
 | `build_model` | Builds a network kind with the configured sizes |
-| `sample_trilinear` | Differentiable trilinear sampling of a volume at points |
+| `voxel_table`, `sample_trilinear` | Table with one row per voxel whose lookups give sparse gradients; differentiable trilinear sampling of a volume at points |
 | `PathTracer` | Soft tracker: amplitudes, start direction, step direction, trace |
 | `path_loss` | Path-consistency loss (or the `onestep` direction loss) |
 | `nonneg_loss` | Penalty on negative fODF amplitudes |

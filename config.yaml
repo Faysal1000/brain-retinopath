@@ -50,9 +50,9 @@ full:
                             # Raise if the validation curves in notebook 05 are still falling at the end;
                             # time is linear in it. Changing it needs retraining (delete outputs/models/).
   steps_per_epoch: 500      # validation and one log row (with hours so far) per epoch.
-  batch_size: auto          # auto or an integer. auto tries 8, 16, 32, 64 and keeps the largest under 70% of GPU
-                            # memory; on CPU/MPS auto means 2. Larger = more memory and time per step. Use one
-                            # value for all runs.
+  batch_size: 16            # an integer or auto. Time per step grows about linearly with it (DGX Spark: about
+                            # 2.6 s per step at 64). auto tries 8, 16, 32, 64 and keeps the largest under 70% of
+                            # GPU memory; on CPU/MPS auto means 2. Use one value for all runs.
   patch: 48                 # cubic training patch (voxels at 1.25 mm). Multiple of 2^(levels-1) (4 for 3 levels);
                             # volumes smaller than this are padded. Keep >= 40: the 40-step path covers 25 mm = 20 voxels.
                             # Larger = more context, more GPU memory and time.

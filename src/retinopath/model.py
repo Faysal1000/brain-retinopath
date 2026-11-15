@@ -81,25 +81,45 @@ def build_model(cfg, kind="unet"):
 
 
 # ------------------------------------------------------------------------------------------------ propagator
-def sample_trilinear(vol, pts):
+class _SparseGrad(torch.autograd.Function):
+    """Identity whose backward pass accepts the sparse gradients of F.embedding and makes them dense once."""
+
+    @staticmethod
+    def forward(ctx, x):
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, g):
+        return g.to_dense() if g.is_sparse else g
+
+
+def voxel_table(vol):
+    """(B, C, X, Y, Z) -> (B * X * Y * Z, C): one row per voxel, for sample_trilinear. Every lookup in the table
+    sends back a sparse gradient, and they are summed into one dense gradient of `vol` at the end. A path of T steps
+    then costs one gradient the size of `vol`, not T."""
+    return _SparseGrad.apply(vol.permute(0, 2, 3, 4, 1).reshape(-1, vol.shape[1]))
+
+
+def sample_trilinear(vol, pts, table=None):
     """vol: (B, C, X, Y, Z); pts: (B, S, 3) in voxel index units. Returns (B, S, C). Differentiable in vol and pts.
-    Points outside the volume are clamped to the border. Written with gather so it runs on CUDA, MPS and CPU. The
-    eight corners are read with one gather: its backward pass makes a gradient the size of `vol`, and one per corner
-    and tracking step was most of the cost of the path loss."""
+    Points outside the volume are clamped to the border. `table`: voxel_table(vol), to be passed when the same
+    volume is sampled many times."""
     B, C, X, Y, Z = vol.shape
+    table = voxel_table(vol) if table is None else table
     size = torch.tensor([X, Y, Z], device=vol.device, dtype=pts.dtype)
     p = torch.minimum(torch.clamp(pts, min=0), size - 1.001)
     i0 = p.floor().long(); f = p - i0
     off = torch.tensor([[dx, dy, dz] for dx in (0, 1) for dy in (0, 1) for dz in (0, 1)], device=vol.device)   # (8, 3)
     ii = i0[:, None] + off[None, :, None]                                                    # (B, 8, S, 3)
     idx = (ii[..., 0] * Y + ii[..., 1]) * Z + ii[..., 2]                                     # (B, 8, S)
+    idx = idx + (torch.arange(B, device=vol.device) * (X * Y * Z))[:, None, None]            # rows of the table
     w = torch.where(off[None, :, None].bool(), f[:, None], 1 - f[:, None])
     w = w[..., 0] * w[..., 1] * w[..., 2]                                                    # (B, 8, S)
-    g = torch.gather(vol.reshape(B, C, -1), 2, idx.reshape(B, 1, -1).expand(-1, C, -1)).reshape(B, C, 8, -1)
+    g = F.embedding(idx, table, sparse=True)                                                 # (B, 8, S, C)
     out = 0
     for k in range(8):
-        out = out + g[:, :, k] * w[:, None, k]
-    return out.transpose(1, 2)
+        out = out + g[:, k] * w[:, k, :, None]
+    return out
 
 
 class PathTracer(nn.Module):
@@ -117,16 +137,16 @@ class PathTracer(nn.Module):
         self.register_buffer("Bm", torch.from_numpy(sh_matrix(u, order)))
         self.cos, self.p = float(np.cos(np.radians(cone_deg))), sharpen
 
-    def amps(self, vol, pts):
-        return torch.relu(sample_trilinear(vol, pts) @ self.Bm.T)                                   # (B, S, K)
+    def amps(self, vol, pts, table=None):
+        return torch.relu(sample_trilinear(vol, pts, table) @ self.Bm.T)                            # (B, S, K)
 
     def start_dirs(self, vol, seeds, inward):
         """Hard start direction: the sphere direction maximising amplitude * relu(cos to inward normal) ** 2."""
         w = self.amps(vol, seeds) * torch.relu(inward @ self.U.T) ** 2
         return self.U[w.argmax(-1)]
 
-    def step_dir(self, vol, pts, prev):
-        a = self.amps(vol, pts)
+    def step_dir(self, vol, pts, prev, table=None):
+        a = self.amps(vol, pts, table)
         w = (a / (a.amax(-1, keepdim=True) + 1e-8)) ** self.p * ((prev @ self.U.T) > self.cos)
         d = w @ self.U
         n = d.norm(dim=-1, keepdim=True)
@@ -134,9 +154,9 @@ class PathTracer(nn.Module):
 
     def trace(self, vol, seeds, d0, steps, step_vox):
         """Euler steps of length step_vox (voxels) from seeds with start directions d0. Returns positions (B, S, steps + 1, 3)."""
-        pts, d, out = seeds, d0, [seeds]
+        pts, d, out, table = seeds, d0, [seeds], voxel_table(vol)
         for _ in range(steps):
-            d = self.step_dir(vol, pts, d)
+            d = self.step_dir(vol, pts, d, table)
             pts = pts + step_vox * d
             out.append(pts)
         return torch.stack(out, 2)

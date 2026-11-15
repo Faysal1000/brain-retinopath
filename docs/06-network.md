@@ -41,10 +41,11 @@ as the other variants, so only the input differs.
 A deterministic tracker whose positions are differentiable with respect to the fODF. All coordinates are voxel
 indices of the patch.
 
-1. **Amplitudes** (`amps`). The fODF is sampled trilinearly at each point (`sample_trilinear`, written with
-   `gather` so it runs on CUDA, MPS and CPU, one call for the eight corners; points outside the volume are
-   clamped to the border) and evaluated on
-   the 362 directions of `symmetric362`. Negative amplitudes are set to 0.
+1. **Amplitudes** (`amps`). The fODF is sampled trilinearly at each point (`sample_trilinear`): the eight
+   corners are looked up in a table with one row per voxel (`voxel_table`). Each lookup sends back a sparse
+   gradient, and the lookups of all steps of a path are summed into one dense gradient of the volume; a dense
+   gradient per step was most of the cost of the path loss. It runs on CUDA, MPS and CPU; points outside the
+   volume are clamped to the border. The sampled fODF is evaluated on the 362 directions of `symmetric362`. Negative amplitudes are set to 0.
 2. **Start direction** (`start_dirs`). The sphere direction maximising amplitude × relu(cos to the inward
    normal)². A hard choice, taken from the reference fODF and shared by the predicted and the reference path.
 3. **Step direction** (`step_dir`). Weights w = (amplitude / max amplitude)^`sharpen` (4) for directions within
