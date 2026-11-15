@@ -206,14 +206,19 @@ def _fodf_file(cfg, job):
     fodf(cfg, ses, name, method, device)
 
 
-def fodf_all(cfg, sessions, name, method, device="cpu", desc="fODF"):
-    """fodf() for every session. Only multi-shell CSD is solved on the GPU: with a GPU `device` those fits run one
-    after another in this process, because the solver keeps the GPU busy by itself and several at once only take
-    turns. Every other fit runs on the CPU, one session per core."""
+def _gpu_fit(cfg, name, method, device):
+    """True for the fits that have a GPU solver: multi-shell CSD and RUMBA-SD, on CUDA."""
     recon = cfg.ref_model if method == "msmt_csd" else CLASSICAL.get(method.split("_")[0], "msmt_csd")
-    gpu = str(device) != "cpu" and recon == "msmt_csd" and (name == "NATIVE" or len(cfg.protocols[name]["shells"]) > 1)
+    multi = name == "NATIVE" or len(cfg.protocols[name]["shells"]) > 1
+    return str(device).startswith("cuda") and (recon == "rumba" or (recon == "msmt_csd" and multi))
+
+
+def fodf_all(cfg, sessions, name, method, device="cpu", desc="fODF"):
+    """fodf() for every session. Multi-shell CSD and RUMBA-SD are solved on the GPU: with a CUDA `device` those fits
+    run one after another in this process, because the solver keeps the GPU busy by itself and several at once only
+    take turns. Every other fit runs on the CPU, one session per core."""
     todo = [s for s in sessions if not (sdir(cfg, s) / f"fodf_{name}_{method}.npz").exists()]
-    if gpu:
+    if _gpu_fit(cfg, name, method, device):
         from tqdm.auto import tqdm
         for ses in tqdm(todo, desc=desc):
             fodf(cfg, ses, name, method, device)
@@ -222,8 +227,11 @@ def fodf_all(cfg, sessions, name, method, device="cpu", desc="fODF"):
 
 
 def save_fodf(cfg, ses, name, method, sh, affine, pve):
-    atomic(sdir(cfg, ses) / f"fodf_{name}_{method}.npz", lambda f: np.savez(f, sh=sh.astype(np.float16), affine=affine, pve=pve.astype(np.float16)))
-    return dict(sh=sh, affine=affine, pve=pve)
+    """Write the fODF as float16 and return it as fodf() reads it back, so that tracking gets the same numbers
+    from a new fit and from the cache."""
+    sh, pve = sh.astype(np.float16), pve.astype(np.float16)
+    atomic(sdir(cfg, ses) / f"fodf_{name}_{method}.npz", lambda f: np.savez(f, sh=sh, affine=affine, pve=pve))
+    return dict(sh=sh.astype(np.float32), affine=affine, pve=pve)
 
 
 def on_ref_grid(fo, anat):
@@ -383,29 +391,49 @@ def robustness_rows(cfg, ses, variants):
     return rows
 
 
-def _grid_rows(cfg, ses, combos, kw):
+def _gpu_fits(cfg, sessions, fits, device, err):
+    try:
+        for ses in sessions:
+            for name, method in fits:
+                if not (sdir(cfg, ses) / f"fodf_{name}_{method}.npz").exists():
+                    fodf(cfg, ses, name, method, device)
+    except BaseException as e:
+        err.append(e)
+
+
+def _grid_rows(cfg, ses, combos, kw, last=()):
     anat = load_anat(cfg, ses)
     keyed = "prf_ang" in anat
     graph = M.Geodesic(anat) if keyed else None                  # surface distances, shared by all combinations
     group = group_key_source(cfg, anat) if keyed else None
     atlas = atlas_key_source(cfg, anat, ses) if keyed else None
-    return [scores(cfg, ses, p, m, anat=anat, graph=graph, group=group, atlas=atlas, **kw) for p, m in combos]
+    order = sorted(range(len(combos)), key=lambda i: (combos[i][0], split_method(combos[i][1])[0]) in last)
+    rows = {i: scores(cfg, ses, *combos[i], anat=anat, graph=graph, group=group, atlas=atlas, **kw) for i in order}
+    return [rows[i] for i in range(len(combos))]
 
 
 def run_grid(cfg, sessions, combos, name, device="cpu", **kw):
     """Scores for every session x (protocol, method); writes outputs/results/<name>.csv and returns the table.
-    One session per worker process, which fits the missing fODFs, tracks and scores: all of these are
-    single-threaded per session. With a GPU `device`, the missing fODFs are fitted first (fodf_all). Everything is cached, so a second call only reads the scores."""
-    import pandas as pd
-    if str(device) != "cpu":
-        for proto, base in dict.fromkeys((p, split_method(m)[0]) for p, m in combos):
-            if base != "proximity" and not base.startswith("net_"):
-                fodf_all(cfg, sessions, proto, base, device, f"{name}: fODF {proto} {base}")
+    One session per worker process, which fits the missing fODFs, tracks and scores, each on one core. With a CUDA
+    `device` the GPU works at the same time: a thread fits the fODFs that have a GPU solver (_gpu_fit), from the
+    last session backwards, while the workers go forwards and leave those methods to the end of each session. A
+    worker that finds no file fits it on its core; both solvers give the same stored fODF, so who gets there first
+    does not change the result. Everything is cached, so a second call only reads the scores."""
+    import pandas as pd, threading
+    fits = [f for f in dict.fromkeys((p, split_method(m)[0]) for p, m in combos)
+            if f[1] != "proximity" and not f[1].startswith("net_") and _gpu_fit(cfg, *f, device)]
     for h in cfg.hemis:                                          # atlas files: fetched here, not by every worker
         atlas_files(cfg, h)
         if any(not s["kind"].startswith("nsd") for s in sessions):
             nsd.bridge_file(cfg, h)
-    rows = each(cfg, lambda c, s: _grid_rows(c, s, combos, kw), sessions, name)
+    err = []; th = threading.Thread(target=_gpu_fits, args=(cfg, sessions[::-1], fits, device, err), daemon=True)
+    if fits:
+        th.start()
+    rows = each(cfg, lambda c, s: _grid_rows(c, s, combos, kw, set(fits)), sessions, name)
+    if fits:
+        th.join()
+    if err:
+        raise err[0]
     df = pd.DataFrame([r for rs in rows for r in rs]); out = cfg.P.out / "results"; out.mkdir(exist_ok=True)
     df.to_csv(out / f"{name}.csv", index=False); return df
 

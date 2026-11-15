@@ -156,23 +156,68 @@ def fit_msmt(p, mask, jobs=1, order=8, device="cpu", use_dipy=False):
     return out
 
 
-def fit_rumba(p, mask, jobs=1, order=8, n_iter=200):
-    """RUMBA-SD (Canales-Rodriguez et al. 2015). The fODF on a sphere is converted to SH so every method tracks alike."""
-    from dipy.reconst.rumba import RumbaSDModel
+def _bessel_ratio(x):
+    """I1(x) / I0(x) by the continued fraction dipy's RUMBA-SD uses (rumba.mbessel_ratio with n = 1)."""
+    return x / ((2 + x) - (3 * x / (3 + 2 * x - (5 * x / (4 + 2 * x - (7 * x / (5 + 2 * x)))))))
+
+
+def rumba_batch(D, K, n_iter, device="cpu"):
+    """RUMBA-SD for many voxels at once: the Richardson-Lucy iterations of dipy's voxel-wise fit (rumba_deconv,
+    Rician noise, noise variance re-estimated each iteration) written for all rows of D together. D: (n, n_grad)
+    signal divided by b=0, first column 1; K: (n_grad, n_comp) kernel. Returns (n, n_comp) fractions that sum to 1.
+    Agrees with dipy to rounding error (1e-15). NumPy float64 on the CPU, torch float64 on CUDA; rows in chunks
+    of 20,000."""
+    eps = np.finfo(float).eps; n = K.shape[1]; lo, hi = (1 / 80) ** 2, (1 / 8) ** 2
+    if str(device).startswith("cuda"):
+        import torch
+        K = torch.as_tensor(K, dtype=torch.float64, device=device); Kt = K.T.contiguous(); out = []
+        for i in range(0, len(D), 20_000):
+            d = torch.as_tensor(np.asarray(D[i:i + 20_000]), dtype=torch.float64, device=device)
+            f = torch.full((len(d), n), 1.0 / n, dtype=torch.float64, device=device)
+            reb = f @ Kt; s2 = torch.full((len(d), 1), (1 / 15) ** 2, dtype=torch.float64, device=device); rs = d * reb / s2
+            for _ in range(n_iter):
+                ratio = _bessel_ratio(rs)
+                f = (f * (((d * ratio) @ K) / (reb @ K + eps))).clamp_(min=0)
+                reb = f @ Kt; rs = d * reb / s2
+                s2 = (((d ** 2 + reb ** 2) / 2 - (s2 * rs) * ratio).sum(1, keepdim=True) / d.shape[1]).clamp_(lo, hi)
+            out.append((f / (f.sum(1, keepdim=True) + eps)).cpu().numpy())
+        return np.concatenate(out)
+    K = np.asarray(K, np.float64); out = []
+    for i in range(0, len(D), 20_000):
+        d = np.asarray(D[i:i + 20_000], np.float64); f = np.full((len(d), n), 1.0 / n)
+        reb = f @ K.T; s2 = np.full((len(d), 1), (1 / 15) ** 2); rs = d * reb / s2
+        for _ in range(n_iter):
+            ratio = _bessel_ratio(rs)
+            f = np.maximum(f * (((d * ratio) @ K) / (reb @ K + eps)), 0)
+            reb = f @ K.T; rs = d * reb / s2
+            s2 = np.clip(((d ** 2 + reb ** 2) / 2 - (s2 * rs) * ratio).sum(1, keepdims=True) / d.shape[1], lo, hi)
+        out.append(f / (f.sum(1, keepdims=True) + eps))
+    return np.concatenate(out)
+
+
+def fit_rumba(p, mask, jobs=1, order=8, n_iter=200, device="cpu"):
+    """RUMBA-SD (Canales-Rodriguez et al. 2015) with dipy's kernel and settings, solved for all voxels together
+    (rumba_batch). The fODF on a sphere is converted to SH so every method tracks alike."""
+    from dipy.reconst.rumba import RumbaSDModel, generate_kernel
     gtab = gtab_of(p); sph = get_sphere(name="symmetric362")
-    ix = _top_fa(p, gtab, p["pve"][0]); fit = TensorModel(gtab).fit(p["dwi"].reshape(-1, p["dwi"].shape[-1])[ix])
+    flat = p["dwi"].reshape(-1, p["dwi"].shape[-1])
+    ix = _top_fa(p, gtab, p["pve"][0]); fit = TensorModel(gtab).fit(flat[ix])
     wm_resp = np.array([fit.evals[:, 0].mean(), fit.evals[:, 1:].mean(), fit.evals[:, 1:].mean()])
     model = RumbaSDModel(gtab, wm_response=wm_resp, n_iter=n_iter, sphere=sph, voxelwise=True)
-    flat = p["dwi"].reshape(-1, p["dwi"].shape[-1]); inv = np.linalg.pinv(sh_matrix(sph.vertices, order))
+    K = generate_kernel(model.gtab, sph, wm_resp, model.gm_response, model.csf_response)
+    inv = np.linalg.pinv(sh_matrix(sph.vertices, order))
 
     def run(ix):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            return model.fit(flat[ix]).odf() @ inv.T
+        d = shm.normalize_data(flat[ix].astype(np.float64), model.where_b0s, min_signal=np.finfo(float).eps)
+        d = np.concatenate([np.ones((len(d), 1)), d[:, model.where_dwi]], 1); d[d > 1] = 1
+        return rumba_batch(d, K, n_iter, device)[:, :-2] @ inv.T
 
-    parts = Parallel(n_jobs=jobs)(delayed(run)(ix) for ix in _chunks(mask, jobs * 4))
+    if str(device).startswith("cuda"):
+        chunks = [np.flatnonzero(mask.ravel())]; parts = [run(chunks[0])]
+    else:
+        chunks = _chunks(mask, jobs * 4); parts = Parallel(n_jobs=jobs)(delayed(run)(ix) for ix in chunks)
     out = np.zeros((mask.size, n_coef(order)), np.float32)
-    for ix, c in zip(_chunks(mask, jobs * 4), parts):
+    for ix, c in zip(chunks, parts):
         out[ix] = c
     return np.moveaxis(out.reshape(mask.shape + (n_coef(order),)), -1, 0)
 
@@ -189,7 +234,7 @@ def fit_fodf(p, mask, method, cfg, jobs=1, device="cpu"):
     if method == "msmt_csd" and multi:
         c = fit_msmt(p, mask, jobs, device=device)
     elif method == "rumba":
-        c = fit_rumba(p, mask, jobs, n_iter=cfg.rumba_iters)
+        c = fit_rumba(p, mask, jobs, n_iter=cfg.rumba_iters, device=device)
     else:
         c = fit_csd(p, mask, jobs)
     return pad_order(c, cfg.sh_order_out)

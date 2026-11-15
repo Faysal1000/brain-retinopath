@@ -143,7 +143,7 @@ together otherwise.
 | `fit_csd` | Single-shell CSD |
 | `solve_qp_batch`, `_admm_torch` | Batched ADMM for the constrained least-squares fit; its iterations on CUDA, in place |
 | `fit_msmt` | Multi-shell multi-tissue CSD |
-| `fit_rumba` | RUMBA-SD, converted to SH |
+| `rumba_batch`, `fit_rumba` | RUMBA-SD iterations for all voxels together (CPU or CUDA); the fit, converted to SH |
 | `pad_order` | Zero-pads a lower-order SH volume |
 | `fit_fodf` | Chooses the fit for a method and pads to `sh_order_out` |
 
@@ -222,7 +222,7 @@ together otherwise.
 | `group_key_source` | Group-average key on a session's vertices |
 | `protocol` | A simulated protocol, or the scan as acquired (`NATIVE`) |
 | `anat_channels`, `net_input`, `inputs_for`, `net_inputs_all` | Anatomical channels; cached network input; inputs of given sessions and protocols in parallel; all training inputs in parallel |
-| `fodf`, `fodf_all`, `save_fodf`, `on_ref_grid` | Cached fODF; the same for all sessions (one per core; multi-shell CSD on a GPU one after another); resampling to the crop grid |
+| `fodf`, `fodf_all`, `save_fodf`, `on_ref_grid` | Cached fODF; the same for all sessions (one per core; multi-shell CSD and RUMBA-SD on a GPU one after another); resampling to the crop grid |
 | `tract`, `proximity_tract`, `streamlines_of` | Cached tractogram; proximity bound; streamlines from a stored tractogram |
 | `scores` | Cached result row |
 | `retest_scores` | Reproducibility between two scans |
@@ -262,7 +262,9 @@ flowchart LR
 - **Protocol names.** Those under `protocols` and `extra_protocols` in `config.yaml`, and `NATIVE` for a scan as
   acquired.
 - **`run_grid`.** One session per joblib worker (`each`): the worker fits the missing fODFs, tracks and scores,
-  each on one core. When a GPU `device` is passed, the missing fODFs are fitted first with `fodf_all`. Each
+  each on one core. When a CUDA `device` is passed, a thread fits the fODFs that have a GPU solver (multi-shell
+  CSD, RUMBA-SD) at the same time, from the last session backwards; the workers leave those methods to the end
+  of each session and fit on their core whatever is still missing. Both solvers give the same stored fODF. Each
   worker loads the anatomy once and builds the group-average key, the atlas key and the
   surface distances (`metrics.Geodesic`) for all combinations of its session.
 - **`cfg_for`.** NSD sessions use `nsd.seeds_per_vertex` and `nsd.ecc_max`.
@@ -332,7 +334,7 @@ The ratio removes uneven coverage but not distance; the distance-matched RSI is 
 | `dwi.npz` | `dwi` (X, Y, Z, N) float32, `bvals` (N,), `bvecs` (N, 3), `mask` (X, Y, Z) |
 | `in_<P>.npy` | (45, X, Y, Z) float16 signal SH on the crop grid |
 | `in_<P>_fodf.npy` | (45, X, Y, Z) float16 CSD fODF on the crop grid (`fodrefine` input) |
-| `fodf_<P>_<M>.npz` | `sh` (45, x, y, z) float16, `affine`, `pve` (3, x, y, z) float16, on the protocol grid |
+| `fodf_<P>_<M>.npz` | `sh` (45, x, y, z) float16, `affine`, `pve` (3, x, y, z) float16, on the protocol grid. Tracking always uses these stored values, also right after a fit |
 | `tract_<P>_<M>.npz` | V1–V3 tractogram (below) |
 | `scores_<P>_<M>_<hash>.json` | One result row |
 

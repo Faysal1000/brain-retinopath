@@ -100,6 +100,8 @@ The main result columns are listed in [08-code.md](08-code.md#result-columns).
   less than 2 GB of free memory per worker, the spare cores go to the fits inside each session.
   The reference fODF is fitted on the GPU one session at a time: its solver works in double precision and keeps
   the GPU busy by itself, so this step is limited by the GPU (about half a minute per session on the DGX Spark).
+  In notebook 04 the GPU fits RUMBA-SD and multi-shell CSD while the CPU cores fit the other methods, track
+  and score.
   Network inference runs `gpu_jobs` sessions at a time, so that reading and writing files overlap with GPU work.
   Progress bars count finished sessions.
 - **Several GPUs in one machine.** `multi_gpu: jobs` trains one network per GPU at the same time.

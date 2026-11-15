@@ -209,10 +209,12 @@ The inverse is computed once; ρ = tr(XᵀX) / tr(CᵀC); 1,000 iterations, chun
 on the CPU or PyTorch on CUDA. `fit_msmt(..., use_dipy=True)` runs DIPY's own solver to check it. The two
 isotropic coefficients are dropped and the 45 white-matter coefficients returned.
 
-**RUMBA-SD** (`fit_rumba`, Canales-Rodríguez et al. 2015). DIPY's `RumbaSDModel` with a tensor white-matter
-response from the single-fibre voxels, `rumba_iters` (200) iterations, voxel-wise. Its fODF is defined on the 362
-directions of `symmetric362` and converted to order-8 SH by least squares, so that it is tracked like every other
-method.
+**RUMBA-SD** (`fit_rumba`, Canales-Rodríguez et al. 2015). DIPY's kernel and settings (`RumbaSDModel`,
+voxel-wise fit, Rician noise) with a tensor white-matter response from the single-fibre voxels and `rumba_iters`
+(200) iterations. DIPY runs the Richardson–Lucy iterations one voxel at a time; `rumba_batch` runs the same
+iterations for all voxels together, in NumPy on the CPU or PyTorch on CUDA (float64, chunks of 20,000 voxels), and
+agrees with DIPY to rounding error (1e-15). The fODF is defined on the 362 directions of `symmetric362` and
+converted to order-8 SH by least squares, so that it is tracked like every other method.
 
 `fit_fodf` dispatches: `msmt_csd` with two or more shells → `fit_msmt`; `rumba` → `fit_rumba`; anything else →
 `fit_csd`. In `pipeline.fodf`, `csd`, `csd_mppca` and `csd_interp` ask for `msmt_csd`, so they become multi-shell
