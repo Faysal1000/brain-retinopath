@@ -165,4 +165,6 @@ minutes for each to save, and stops.
 network at once (zero-padded to a multiple of 2^(levels−1) and cropped back), with the same mixed precision as
 training. `net_fodf` sets the prediction to zero where wm ≤ `wm_mask_thr` and stores it like a classical fit as
 `fodf_<protocol>_net_<variant>_s<seed>.npz`; from then on the network is tracked and scored exactly like CSD.
+`net_fodf_all` does this for all sessions: the inputs are made first, one session per core, then `gpu_jobs`
+sessions at a time run in threads that share the network.
 `trained_runs` returns the runs listed in `config.yaml` whose checkpoint is finished; only these are evaluated.

@@ -174,7 +174,7 @@ together otherwise.
 | `train` | One training run, resumable (also `python -m retinopath.train --variant V --seed S [--dev]`) |
 | `take_over`, `_alive` | One process per run folder |
 | `clear_outputs` | Removes cached outputs of an earlier network with the same name |
-| `load_trained`, `net_fodf`, `trained_runs` | Load a trained network, write its fODF for a session, list finished runs |
+| `load_trained`, `net_fodf`, `net_fodf_all`, `trained_runs` | Load a trained network, write its fODF for a session, the same for all sessions (`gpu_jobs` threads), list finished runs |
 
 ### `jobs.py`: running training runs ([06-network.md](06-network.md#running-training-runs-jobspy))
 
@@ -216,13 +216,13 @@ together otherwise.
 |---|---|
 | `CLASSICAL`, `split_method` | Method name → fODF fit and tracker |
 | `session`, `cfg_for`, `sdir` | Session description, NSD settings, cache folder |
-| `each` | Runs a function over sessions, one per worker process (`n_jobs`, limited by free memory) |
+| `each` | Runs a function over sessions, one per worker process (`n_jobs`, limited by free memory); the bar counts finished sessions |
 | `prepare`, `prepare_all` | Download if needed and cache the crop; all sessions in parallel |
 | `load_anat`, `load_dwi` | Read the cached crop |
 | `group_key_source` | Group-average key on a session's vertices |
 | `protocol` | A simulated protocol, or the scan as acquired (`NATIVE`) |
-| `anat_channels`, `net_input`, `net_inputs_all` | Anatomical channels; cached network input; all training inputs in parallel |
-| `fodf`, `save_fodf`, `on_ref_grid` | Cached fODF; resampling to the crop grid |
+| `anat_channels`, `net_input`, `inputs_for`, `net_inputs_all` | Anatomical channels; cached network input; inputs of given sessions and protocols in parallel; all training inputs in parallel |
+| `fodf`, `fodf_all`, `save_fodf`, `on_ref_grid` | Cached fODF; the same for all sessions (one per core, or `gpu_jobs` at a time on a GPU); resampling to the crop grid |
 | `tract`, `proximity_tract`, `streamlines_of` | Cached tractogram; proximity bound; streamlines from a stored tractogram |
 | `scores` | Cached result row |
 | `retest_scores` | Reproducibility between two scans |
@@ -262,7 +262,7 @@ flowchart LR
 - **Protocol names.** Those under `protocols` and `extra_protocols` in `config.yaml`, and `NATIVE` for a scan as
   acquired.
 - **`run_grid`.** One session per joblib worker (`each`): the worker fits the missing fODFs, tracks and scores,
-  each on one core. When a GPU `device` is passed, the missing fODFs are fitted first in the main process. Each
+  each on one core. When a GPU `device` is passed, the missing fODFs are fitted first with `fodf_all`. Each
   worker loads the anatomy once and builds the group-average key, the atlas key and the
   surface graph for all combinations of its session.
 - **`cfg_for`.** NSD sessions use `nsd.seeds_per_vertex` and `nsd.ecc_max`.

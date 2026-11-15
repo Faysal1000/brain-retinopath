@@ -366,6 +366,23 @@ def net_fodf(cfg, ses, name, method, model, device):
     PL.save_fodf(cfg, ses, name, method, sh, a["affine"], a["pve"])
 
 
+def net_fodf_all(cfg, sessions, names, method, model, device, desc=None):
+    """net_fodf for every session and protocol in `names`. The network inputs are made first, one session per core;
+    then cfg.gpu_jobs sessions at a time run in threads that share the model, because reading the inputs and
+    writing the fODFs take longer than the forward pass."""
+    from concurrent.futures import ThreadPoolExecutor
+    from tqdm.auto import tqdm
+    todo = [s for s in sessions if not all((PL.sdir(cfg, s) / f"fodf_{n}_{method}.npz").exists() for n in names)]
+    PL.inputs_for(cfg, todo, names, cfg.model.input, f"{method}: inputs")
+
+    def one(ses):
+        for name in names:
+            net_fodf(cfg, ses, name, method, model, device)
+
+    with ThreadPoolExecutor(max(1, int(cfg.gpu_jobs))) as ex:
+        list(tqdm(ex.map(one, sessions), total=len(sessions), desc=desc or method))
+
+
 def trained_runs(cfg):
     """[(variant, seed)] of the runs listed in config.yaml that have finished training."""
     from .jobs import train_commands

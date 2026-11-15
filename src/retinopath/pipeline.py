@@ -47,17 +47,21 @@ def sdir(cfg, ses):
 
 
 # ---------------------------------------------------------------- one session per core
-def each(cfg, fn, items, desc=None, gb=2.0):
+def each(cfg, fn, items, desc=None, gb=2.0, jobs=None):
     """[fn(cfg, item) for item in items], one item per worker process: reading a scan, simulating a protocol,
     tracking and scoring are single-threaded. The workers share cfg.n_jobs cores: with fewer items than cores, or
-    less than `gb` GB of free memory per worker, each worker gets the spare cores for its own fits."""
+    less than `gb` GB of free memory per worker, each worker gets the spare cores for its own fits. jobs: upper
+    limit on the workers (work that shares the GPU). The progress bar counts finished items."""
     import psutil
     from joblib import Parallel, delayed
     from tqdm.auto import tqdm
     items = list(items); total = n_jobs(cfg)
-    n = max(1, min(total, len(items), int(psutil.virtual_memory().available / 2**30 / gb)))
+    if not items:
+        return []
+    n = max(1, min(jobs or total, total, len(items), int(psutil.virtual_memory().available / 2**30 / gb)))
     one = copy.deepcopy(cfg); one["n_jobs"] = max(1, total // n)
-    return Parallel(n_jobs=n)(delayed(fn)(one, x) for x in tqdm(items, desc=desc))
+    out = Parallel(n_jobs=n, return_as="generator")(delayed(fn)(one, x) for x in items)
+    return list(tqdm(out, total=len(items), desc=desc))
 
 
 # ---------------------------------------------------------------- crop
@@ -152,6 +156,19 @@ def _net_inputs(cfg, sid):
             net_input(cfg, session(sid), p, source="fodf")
 
 
+def _inputs_of(cfg, job):
+    ses, names, source = job
+    for name in names:
+        net_input(cfg, ses, name, source=source)
+
+
+def inputs_for(cfg, sessions, names, source="signal", desc="network inputs"):
+    """Cached network inputs (`source`: signal or fodf) of these sessions and protocols, one session per worker;
+    sessions that have them all are skipped."""
+    f = lambda s, n: sdir(cfg, s) / (f"in_{n}.npy" if source == "signal" else f"in_{n}_fodf.npy")
+    each(cfg, _inputs_of, [(s, names, source) for s in sessions if not all(f(s, n).exists() for n in names)], desc)
+
+
 def net_inputs_all(cfg, sids):
     """Cached network inputs of every training protocol for these subjects, one subject per worker."""
     each(cfg, _net_inputs, sids, "network inputs")
@@ -176,6 +193,20 @@ def fodf(cfg, ses, name, method, device="cpu", anat=None):
     recon = cfg.ref_model if method == "msmt_csd" else CLASSICAL.get(method.split("_")[0], "msmt_csd")
     sh = fit_fodf(p, p["pve"][0] > cfg.wm_mask_thr, recon, cfg, n_jobs(cfg), device)
     return save_fodf(cfg, ses, name, method, sh, p["affine"], p["pve"])
+
+
+def _fodf_file(cfg, job):
+    ses, name, method, device = job
+    fodf(cfg, ses, name, method, device)
+
+
+def fodf_all(cfg, sessions, name, method, device="cpu", desc="fODF"):
+    """fodf() for every session. On the CPU one session per core; on a GPU cfg.gpu_jobs sessions at a time, so that
+    loading, response functions and saving of one session overlap with the GPU fit of another."""
+    gpu = str(device) != "cpu"
+    todo = [s for s in sessions if not (sdir(cfg, s) / f"fodf_{name}_{method}.npz").exists()]
+    each(cfg, _fodf_file, [(s, name, method, str(device)) for s in todo], desc, gb=4.0 if gpu else 2.0,
+         jobs=cfg.gpu_jobs if gpu else None)
 
 
 def save_fodf(cfg, ses, name, method, sh, affine, pve):
@@ -352,16 +383,12 @@ def _grid_rows(cfg, ses, combos, kw):
 def run_grid(cfg, sessions, combos, name, device="cpu", **kw):
     """Scores for every session x (protocol, method); writes outputs/results/<name>.csv and returns the table.
     One session per worker process, which fits the missing fODFs, tracks and scores: all of these are
-    single-threaded per session. With a GPU `device`, the missing fODFs are fitted first in this process, since the
-    workers do not share the GPU. Everything is cached, so a second call only reads the scores."""
+    single-threaded per session. With a GPU `device`, the missing fODFs are fitted first (fodf_all). Everything is cached, so a second call only reads the scores."""
     import pandas as pd
     if str(device) != "cpu":
-        from tqdm.auto import tqdm
-        for ses in tqdm(sessions, desc=f"{name}: fODF"):
-            for proto, method in combos:
-                base = split_method(method)[0]
-                if base != "proximity" and not (sdir(cfg, ses) / f"fodf_{proto}_{base}.npz").exists():
-                    fodf(cfg, ses, proto, base, device)
+        for proto, base in dict.fromkeys((p, split_method(m)[0]) for p, m in combos):
+            if base != "proximity" and not base.startswith("net_"):
+                fodf_all(cfg, sessions, proto, base, device, f"{name}: fODF {proto} {base}")
     rows = each(cfg, lambda c, s: _grid_rows(c, s, combos, kw), sessions, name)
     df = pd.DataFrame([r for rs in rows for r in rs]); out = cfg.P.out / "results"; out.mkdir(exist_ok=True)
     df.to_csv(out / f"{name}.csv", index=False); return df
