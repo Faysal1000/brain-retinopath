@@ -46,6 +46,20 @@ def sdir(cfg, ses):
     d = cfg.P.cache / ses["tag"]; d.mkdir(parents=True, exist_ok=True); return d
 
 
+# ---------------------------------------------------------------- one session per core
+def each(cfg, fn, items, desc=None, gb=2.0):
+    """[fn(cfg, item) for item in items], one item per worker process: reading a scan, simulating a protocol,
+    tracking and scoring are single-threaded. The workers share cfg.n_jobs cores: with fewer items than cores, or
+    less than `gb` GB of free memory per worker, each worker gets the spare cores for its own fits."""
+    import psutil
+    from joblib import Parallel, delayed
+    from tqdm.auto import tqdm
+    items = list(items); total = n_jobs(cfg)
+    n = max(1, min(total, len(items), int(psutil.virtual_memory().available / 2**30 / gb)))
+    one = copy.deepcopy(cfg); one["n_jobs"] = max(1, total // n)
+    return Parallel(n_jobs=n)(delayed(fn)(one, x) for x in tqdm(items, desc=desc))
+
+
 # ---------------------------------------------------------------- crop
 def prepare(cfg, ses, s3=None):
     """Download (if needed) and cache the occipital crop of one session."""
@@ -72,6 +86,11 @@ def prepare(cfg, ses, s3=None):
     if not cfg.keep_raw:
         shutil.rmtree(raw / ses["dwi"], ignore_errors=True)
     return d
+
+
+def prepare_all(cfg, sessions, desc="crops"):
+    """prepare() for every session, in parallel: unpacking a scan takes one core for several seconds."""
+    each(cfg, prepare, sessions, desc)
 
 
 def load_anat(cfg, ses):
@@ -126,6 +145,18 @@ def net_input(cfg, ses, name, anat=None, source="signal"):
     atomic(f, lambda t: np.save(t, x)); return x
 
 
+def _net_inputs(cfg, sid):
+    for p in cfg.train_protocols:
+        net_input(cfg, session(sid), p)
+        if "fodrefine" in cfg.variants:                          # classical fODF as input
+            net_input(cfg, session(sid), p, source="fodf")
+
+
+def net_inputs_all(cfg, sids):
+    """Cached network inputs of every training protocol for these subjects, one subject per worker."""
+    each(cfg, _net_inputs, sids, "network inputs")
+
+
 # ---------------------------------------------------------------- fODF
 def fodf(cfg, ses, name, method, device="cpu", anat=None):
     """fODF of `method` on protocol `name`. Returns dict(sh, affine, pve). Methods: msmt_csd (reference), csd, rumba,
@@ -176,7 +207,7 @@ def tract(cfg, ses, name, method, device="cpu", anat=None):
         # Every method is tracked on the crop grid with the same tissue maps (fODFs of coarser protocols are
         # interpolated), so differences between methods come from the fODF and not from the stopping rule.
         fo = fodf(cfg, ses, name, base, device, anat)
-        sl = run_tracking(on_ref_grid(fo, anat), anat["affine"], anat["pve"], seeds, cfg, cfg.seed, n_jobs(cfg), tracker)
+        sl = run_tracking(on_ref_grid(fo, anat), anat["affine"], anat["pve"], seeds, cfg, cfg.seed, 1, tracker)   # one thread: sessions run in parallel
         ep = endpoints(sl, anat, cfg)
         a, b, pair, keep = area_pairs(ep, anat)
         sl = [sl[i] for i in keep]
@@ -293,6 +324,22 @@ def make_subject_lists(cfg, s3=None):
     save_json(lists, f); return lists
 
 
+def robustness_rows(cfg, ses, variants):
+    """RSI of the reference tractogram of one session under other analysis settings (`variants`: name -> changes
+    to cfg.prf), with the key from each half of the pRF runs, and for dorsal / ventral / left / right streamlines."""
+    a = load_anat(cfg, ses); t = tract(cfg, ses, "REF", "msmt_csd", anat=a); rows = []
+    score = lambda c, m=slice(None), **k: M.retinotopic_scores(a, t["a"][m], t["b"][m], t["pair"][m], c, seed=cfg.seed, **k)
+    for name, ch in variants.items():
+        c = copy.deepcopy(cfg); c.prf.update(ch)
+        rows.append(dict(sid=ses["sid"], analysis=name, **score(c)))
+    for fit in (1, 2):
+        rows.append(dict(sid=ses["sid"], analysis=f"pRF half {fit}", **score(cfg, key=M.get_key(a, cfg, fit))))
+    for sub, m in (("dorsal", a["dorsal"][t["a"]]), ("ventral", ~a["dorsal"][t["a"]]), ("left", a["hemi"][t["a"]] == 0), ("right", a["hemi"][t["a"]] == 1)):
+        if m.sum() > 50:
+            rows.append(dict(sid=ses["sid"], analysis=sub, **score(cfg, m)))
+    return rows
+
+
 def _grid_rows(cfg, ses, combos, kw):
     anat = load_anat(cfg, ses)
     keyed = "prf_ang" in anat
@@ -304,19 +351,18 @@ def _grid_rows(cfg, ses, combos, kw):
 
 def run_grid(cfg, sessions, combos, name, device="cpu", **kw):
     """Scores for every session x (protocol, method); writes outputs/results/<name>.csv and returns the table.
-    Missing fODFs are fitted first, in this process (the fits use all cores or the GPU themselves). Tracking and
-    scoring then run one session per worker process, because the tracker is single-threaded. Everything is cached,
-    so a second call only reads the scores."""
+    One session per worker process, which fits the missing fODFs, tracks and scores: all of these are
+    single-threaded per session. With a GPU `device`, the missing fODFs are fitted first in this process, since the
+    workers do not share the GPU. Everything is cached, so a second call only reads the scores."""
     import pandas as pd
-    from joblib import Parallel, delayed
-    from tqdm.auto import tqdm
-    for ses in tqdm(sessions, desc=f"{name}: fODF"):
-        for proto, method in combos:
-            base = split_method(method)[0]
-            if base != "proximity" and not (sdir(cfg, ses) / f"fodf_{proto}_{base}.npz").exists():
-                fodf(cfg, ses, proto, base, device)
-    one = copy.deepcopy(cfg); one["n_jobs"] = 1
-    rows = Parallel(n_jobs=min(n_jobs(cfg), len(sessions)))(delayed(_grid_rows)(one, s, combos, kw) for s in tqdm(sessions, desc=name))
+    if str(device) != "cpu":
+        from tqdm.auto import tqdm
+        for ses in tqdm(sessions, desc=f"{name}: fODF"):
+            for proto, method in combos:
+                base = split_method(method)[0]
+                if base != "proximity" and not (sdir(cfg, ses) / f"fodf_{proto}_{base}.npz").exists():
+                    fodf(cfg, ses, proto, base, device)
+    rows = each(cfg, lambda c, s: _grid_rows(c, s, combos, kw), sessions, name)
     df = pd.DataFrame([r for rs in rows for r in rs]); out = cfg.P.out / "results"; out.mkdir(exist_ok=True)
     df.to_csv(out / f"{name}.csv", index=False); return df
 

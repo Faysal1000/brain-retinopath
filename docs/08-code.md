@@ -216,17 +216,19 @@ together otherwise.
 |---|---|
 | `CLASSICAL`, `split_method` | Method name → fODF fit and tracker |
 | `session`, `cfg_for`, `sdir` | Session description, NSD settings, cache folder |
-| `prepare` | Download if needed and cache the crop |
+| `each` | Runs a function over sessions, one per worker process (`n_jobs`, limited by free memory) |
+| `prepare`, `prepare_all` | Download if needed and cache the crop; all sessions in parallel |
 | `load_anat`, `load_dwi` | Read the cached crop |
 | `group_key_source` | Group-average key on a session's vertices |
 | `protocol` | A simulated protocol, or the scan as acquired (`NATIVE`) |
-| `anat_channels`, `net_input` | Anatomical channels; cached network input |
+| `anat_channels`, `net_input`, `net_inputs_all` | Anatomical channels; cached network input; all training inputs in parallel |
 | `fodf`, `save_fodf`, `on_ref_grid` | Cached fODF; resampling to the crop grid |
 | `tract`, `proximity_tract`, `streamlines_of` | Cached tractogram; proximity bound; streamlines from a stored tractogram |
 | `scores` | Cached result row |
 | `retest_scores` | Reproducibility between two scans |
 | `make_subject_lists` | Subject lists |
 | `run_grid` | Scores for sessions × (protocol, method), saved as a CSV |
+| `robustness_rows` | RSI of one session's reference tractogram under other analysis settings (notebook 08) |
 | `download_all` | Every file a configuration needs (also `python -m retinopath.pipeline [--dev] [--connections N] [--list]`) |
 
 ### `stats.py`: statistics ([07-scoring.md](07-scoring.md#statistics-statspy-notebook-09))
@@ -259,9 +261,9 @@ flowchart LR
   filtering. `csd` and `csd+prob` share `fodf_<P>_csd.npz`.
 - **Protocol names.** Those under `protocols` and `extra_protocols` in `config.yaml`, and `NATIVE` for a scan as
   acquired.
-- **`run_grid`.** Missing fODFs are fitted first in the main process (the fits use all cores, or the GPU for
-  multi-shell CSD). Tracking and scoring then run one session per joblib worker, because the tracker is
-  single-threaded. Each worker loads the anatomy once and builds the group-average key, the atlas key and the
+- **`run_grid`.** One session per joblib worker (`each`): the worker fits the missing fODFs, tracks and scores,
+  each on one core. When a GPU `device` is passed, the missing fODFs are fitted first in the main process. Each
+  worker loads the anatomy once and builds the group-average key, the atlas key and the
   surface graph for all combinations of its session.
 - **`cfg_for`.** NSD sessions use `nsd.seeds_per_vertex` and `nsd.ecc_max`.
 - **`keep_raw: false`.** `prepare` deletes a subject's raw HCP diffusion folder once its crop is cached.

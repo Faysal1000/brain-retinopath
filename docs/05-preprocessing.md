@@ -172,6 +172,7 @@ networks therefore use only the b = 3000 shell of NSD.
   wm > 0.95, from a tensor fitted on the shells up to b = 1500 (or the lowest shell when none is that low). They
   give the white-matter response functions.
 - **Parallel fits.** Voxel-wise fits are split into 4 × `n_jobs` chunks and run with joblib (`_fit_parallel`).
+  When sessions already run one per core (`pipeline.each`), each fit uses one core.
 
 ### Methods
 

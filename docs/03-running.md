@@ -95,8 +95,10 @@ The main result columns are listed in [08-code.md](08-code.md#result-columns).
   largest batch that fits (up to 64). Each epoch's line (in the terminal and in `outputs/logs/<run>.log`) gives the hours left for
   that run and the peak GPU memory (`gpu_gb`, and `gpu_reserved_gb` held by PyTorch). Work per run grows with
   `batch_size × epochs × steps_per_epoch`, so a fixed smaller `batch_size` or fewer `epochs` shortens training;
-  use the same values for every network. fODF fitting uses all CPU cores but one (`n_jobs`); tracking and scoring run one
-  session per core.
+  use the same values for every network. Cropping, network inputs, classical fODFs, tracking and scoring run one
+  session per CPU core, on all cores but one (`n_jobs`, any number of cores). With fewer sessions than cores, or
+  less than 2 GB of free memory per worker, the spare cores go to the fits inside each session.
+  The reference fODF is fitted on the GPU, one session at a time.
 - **Several GPUs in one machine.** `multi_gpu: jobs` trains one network per GPU at the same time.
   `multi_gpu: ddp` makes each training run use all GPUs with PyTorch distributed training; the learning rate is
   scaled by the number of processes.
