@@ -243,7 +243,8 @@ grayordinate data (retinotopy, Wang labels) on the meshes.
 ## Cached steps
 
 Every step writes one file per session (and protocol, method) under `data/cache/<tag>/` and returns that file on
-later calls, so running a notebook twice redoes nothing. Every file is written through `core.atomic`.
+later calls. Files made from a trained network (methods `net_*`) go to `outputs/cache/<tag>/` instead, so that two
+runs with different `paths.out` share all other cached work but keep their own networks, so running a notebook twice redoes nothing. Every file is written through `core.atomic`.
 
 ```mermaid
 flowchart LR
@@ -272,11 +273,12 @@ flowchart LR
 
 ### Subject lists (`make_subject_lists`)
 
-Drawn once with `seed` and saved to `outputs/subjects.json`; later calls read the file.
+Drawn once with `seed` and saved to `outputs/subjects.json`; later calls read the file. A count of `-1` takes
+every subject that qualifies.
 
 - `test`: random subjects of the HCP 7T retinotopy release (group averages 9999xx excluded) that have 3T diffusion.
 - `train`, `val`: random HCP 1200 subjects in neither the retinotopy release nor the retest release that have 3T
-  diffusion.
+  diffusion. The first `n_val` of the shuffled pool are validation, the next `n_train` training.
 - `t7`: the first `n_7t` test subjects that have 7T diffusion.
 - `retest`: subjects with retinotopy and a retest diffusion scan.
 - `nsd`: `subj01` … `subjNN` for `n_nsd`.
@@ -337,6 +339,8 @@ The ratio removes uneven coverage but not distance; the distance-matched RSI is 
 | `fodf_<P>_<M>.npz` | `sh` (45, x, y, z) float16, `affine`, `pve` (3, x, y, z) float16, on the protocol grid. Tracking always uses these stored values, also right after a fit |
 | `tract_<P>_<M>.npz` | V1–V3 tractogram (below) |
 | `scores_<P>_<M>_<hash>.json` | One result row |
+
+`outputs/cache/<tag>/` holds the same `fodf_`, `tract_` and `scores_` files for the `net_*` methods.
 
 `data/cache/settings.json` holds the cached settings; `data/manifest.json` every downloaded file with size and
 ETag.

@@ -17,13 +17,18 @@ The chosen block is merged over the top-level keys. Both blocks hold the same ke
 
 | Key | Meaning | Default | Limit | Raising it |
 |---|---|---|---|---|
-| `n_test` | Test subjects with measured retinotopy | 120 | about 181 | More statistical power; 1.4 GB and a few CPU minutes per subject |
+| `n_test` | Test subjects with measured retinotopy | -1 (all, 178) | 178 | More statistical power; 1.4 GB and a few CPU minutes per subject |
 | `n_train`, `n_val` | Training and validation subjects | 30, 8 | about 900 available | Better networks; 1.4 GB each; all training volumes sit in GPU memory |
 | `n_7t` | Test subjects also scored on their 7T scan | 40 | `n_test` | 1.1 GB each |
 | `n_retest` | Test-retest subjects | 20 | about 20 | Tighter reproducibility interval |
 | `n_nsd` | NSD subjects | 8 | 8 | 4 GB per subject per run |
-| `train_seeds` | Seeds for the `path` and `voxel` networks | `[0, 1]` | none | One more run of each per seed |
+| `train_seeds` | Seeds for the `path` and `voxel` networks | `[0, 1, 2]` | none | One more run of each per seed |
 | `variants` | Networks to train | 6 | `path, voxel, onestep, noanat, wmseeds, mlp, fodrefine` | One training run each; `fodrefine` also needs a CSD fit per training subject and protocol |
+
+`n_test`, `n_train`, `n_7t`, `n_retest` and `n_nsd` accept `-1`: every subject that qualifies is taken, and the
+sizes of the lists are printed when they are drawn. `n_val` is always a number. Validation subjects are drawn before training subjects, so they stay the same when
+`n_train` changes, and a larger `n_train` keeps every subject of a smaller one: runs with different `n_train`
+(for example 30, 100, 200) can be compared directly. Each needs its own `outputs/subjects.json`.
 | `epochs`, `steps_per_epoch` | Training length per run, `epochs × steps_per_epoch` steps | 60, 500 | none | Time linear; a run started with another length must be deleted and retrained |
 | `max_train_hours` | Optional wall-clock limit per run | `null` (off) | none | A limit gives slower variants fewer steps; keep `null` for reported results |
 | `seeds_per_vertex` | Tractography seeds per V1–V3 vertex | 10 | none | More streamlines, linear tracking time |
@@ -33,10 +38,16 @@ The chosen block is merged over the top-level keys. Both blocks hold the same ke
 | `run_protocols` | Protocols evaluated | 9 | names under `protocols` | One more column of the grid |
 
 Every run trains the same 30,000 steps. Each log row in `outputs/models/<run>/log.json` carries the hours so far,
-so the first epoch shows how long a run will take. With the defaults there are eight runs:
-`path` and `voxel` with two seeds each, plus `onestep`, `noanat`, `mlp` and `fodrefine`.
+so the first epoch shows how long a run will take. With the defaults there are ten runs:
+`path` and `voxel` with three seeds each, plus `onestep`, `noanat`, `mlp` and `fodrefine`.
 
-After changing any `n_*`, delete `outputs/subjects.json` so the lists are drawn again.
+After changing any `n_*`, delete `outputs/subjects.json` so the lists are drawn again; the notebooks stop with a
+message when the file does not match `n_test`, `n_train` or `n_val`.
+
+To compare training sizes on one machine, run the experiment once per size, each with its own output folder:
+set `n_train` and `paths.out` (for example `n_train: 50`, `out: outputs_train50`) and run `run_all.sh full`. The
+runs share `data/` (crops, reference and classical fODFs, their tractograms and scores), so a second run only
+trains its networks and scores them; it keeps its own `subjects.json`, networks, results and figures.
 
 ## Protocols
 

@@ -27,8 +27,9 @@ paths:                      # relative to this file
 # ---- experiment size -----------------------------------------------------------------
 # Every notebook logs its wall-clock hours to outputs/run_log.csv.
 # Subject lists are drawn once and saved to outputs/subjects.json; delete that file after changing any n_*.
+# n_test, n_train, n_7t, n_retest and n_nsd accept -1 = every subject that qualifies; the numbers used are printed.
 full:
-  n_test: 120               # test subjects with measured HCP 7T retinotopy. Max about 181 (a few lack 3T diffusion).
+  n_test: -1                # test subjects with measured HCP 7T retinotopy; -1 = all of them (178 have 3T diffusion).
                             # More = more statistical power; about 1.4 GB download and a few CPU minutes each, roughly linear.
   n_train: 30               # training subjects: HCP subjects WITHOUT 7T data (about 900 available).
                             # More = better networks, 1.4 GB download each; all training volumes are held in GPU memory.
@@ -37,7 +38,7 @@ full:
                             # Most of the 181 have one; about 1.1 GB each.
   n_retest: 20              # HCP retest subjects that also have retinotopy; about 20 exist at most.
   n_nsd: 8                  # NSD subjects, 0 to 8; about 4 GB per subject per diffusion run.
-  train_seeds: [0, 1]       # integer seeds; each extra seed adds one training run for `path` and one for `voxel`.
+  train_seeds: [0, 1, 2]    # integer seeds; each extra seed adds one training run for `path` and one for `voxel`.
   variants: [path, voxel, onestep, noanat, mlp, fodrefine]   # allowed: path, voxel, onestep, noanat, wmseeds, mlp,
                             # fodrefine. path and voxel are required for H3. One training run each (times
                             # len(train_seeds) for path and voxel). fodrefine also needs a classical CSD fit of every

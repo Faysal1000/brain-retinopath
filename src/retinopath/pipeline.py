@@ -6,7 +6,7 @@ nsd / nsd2 (first / second NSD diffusion run). Cache files live in cfg.P.cache/<
 A "method" names the fODF and, after a plus sign, the tracker: csd, rumba, net_path_s0, csd+prob. No suffix means
 particle-filter tracking.
 """
-import copy, hashlib, json, shutil, threading
+import copy, hashlib, itertools, json, shutil, threading
 import numpy as np
 from pathlib import Path
 from scipy.spatial import cKDTree
@@ -42,8 +42,12 @@ def cfg_for(cfg, ses):
     return c
 
 
-def sdir(cfg, ses):
-    d = cfg.P.cache / ses["tag"]; d.mkdir(parents=True, exist_ok=True); return d
+def sdir(cfg, ses, method=""):
+    """Cache folder of a session. Files made from a trained network (methods net_*) belong to one run of the
+    experiment and go under the output folder, so runs with their own `paths.out` (for example different n_train)
+    share every other cached file but never each other's networks."""
+    root = cfg.P.out / "cache" if method.startswith("net_") else cfg.P.cache
+    d = root / ses["tag"]; d.mkdir(parents=True, exist_ok=True); return d
 
 
 # ---------------------------------------------------------------- one session per core
@@ -184,7 +188,7 @@ def net_inputs_all(cfg, sids):
 def fodf(cfg, ses, name, method, device="cpu", anat=None):
     """fODF of `method` on protocol `name`. Returns dict(sh, affine, pve). Methods: msmt_csd (reference), csd, rumba,
     csd_mppca (denoise first), csd_interp (interpolate the DWIs to the reference grid first)."""
-    f = sdir(cfg, ses) / f"fodf_{name}_{method}.npz"
+    f = sdir(cfg, ses, method) / f"fodf_{name}_{method}.npz"
     if f.exists():
         z = np.load(f); return dict(sh=z["sh"].astype(np.float32), affine=z["affine"], pve=z["pve"])
     if method.startswith("net_"):
@@ -217,7 +221,7 @@ def fodf_all(cfg, sessions, name, method, device="cpu", desc="fODF"):
     """fodf() for every session. Multi-shell CSD and RUMBA-SD are solved on the GPU: with a CUDA `device` those fits
     run one after another in this process, because the solver keeps the GPU busy by itself and several at once only
     take turns. Every other fit runs on the CPU, one session per core."""
-    todo = [s for s in sessions if not (sdir(cfg, s) / f"fodf_{name}_{method}.npz").exists()]
+    todo = [s for s in sessions if not (sdir(cfg, s, method) / f"fodf_{name}_{method}.npz").exists()]
     if _gpu_fit(cfg, name, method, device):
         from tqdm.auto import tqdm
         for ses in tqdm(todo, desc=desc):
@@ -230,7 +234,7 @@ def save_fodf(cfg, ses, name, method, sh, affine, pve):
     """Write the fODF as float16 and return it as fodf() reads it back, so that tracking gets the same numbers
     from a new fit and from the cache."""
     sh, pve = sh.astype(np.float16), pve.astype(np.float16)
-    atomic(sdir(cfg, ses) / f"fodf_{name}_{method}.npz", lambda f: np.savez(f, sh=sh, affine=affine, pve=pve))
+    atomic(sdir(cfg, ses, method) / f"fodf_{name}_{method}.npz", lambda f: np.savez(f, sh=sh, affine=affine, pve=pve))
     return dict(sh=sh.astype(np.float32), affine=affine, pve=pve)
 
 
@@ -245,7 +249,7 @@ def on_ref_grid(fo, anat):
 def tract(cfg, ses, name, method, device="cpu", anat=None):
     """Tractogram reduced to what the analysis needs: end vertices of V1-V3 streamlines, counts, density map,
     and the streamlines themselves (for figures and test-retest overlap). Same seeds for every method."""
-    f = sdir(cfg, ses) / f"tract_{name}_{method}.npz"
+    f = sdir(cfg, ses, method) / f"tract_{name}_{method}.npz"
     if f.exists():
         return dict(np.load(f))
     anat = anat if anat is not None else load_anat(cfg, ses)
@@ -297,7 +301,7 @@ def scores(cfg, ses, name, method, ref=("REF", "msmt_csd"), anat=None, graph=Non
     # cache key: analysis settings that change the scores but not the tractogram
     sig = json.dumps([cfg.prf, cfg.n_null, cfg.seed, list(ref) if ref else None, graph is not None, group is not None,
                       atlas is not None], sort_keys=True)
-    cache = sdir(cfg, ses) / f"scores_{name}_{method}_{hashlib.md5(sig.encode()).hexdigest()[:8]}.json"
+    cache = sdir(cfg, ses, method) / f"scores_{name}_{method}_{hashlib.md5(sig.encode()).hexdigest()[:8]}.json"
     if cache.exists():                                           # already scored with these analysis settings
         return load_json(cache)
     anat = anat if anat is not None else load_anat(cfg, ses)
@@ -352,26 +356,39 @@ def retest_scores(cfg, sid, name="REF", method="msmt_csd", kinds=("3T", "retest"
 # ---------------------------------------------------------------- subject lists and result tables
 def make_subject_lists(cfg, s3=None):
     """Fixed, seeded subject lists saved to outputs/subjects.json. Test = subjects with measured 7T retinotopy.
-    Training and validation subjects come from the rest of HCP, so no test subject is ever seen in training."""
+    Training and validation subjects come from the rest of HCP, so no test subject is ever seen in training.
+    A count of -1 in config.yaml takes every subject that qualifies; the sizes are printed when the lists are drawn.
+    The validation subjects do not depend on n_train, and a larger n_train adds subjects to the same list, so runs
+    that differ only in n_train can be compared."""
     f = cfg.P.out / "subjects.json"
     if f.exists():
-        return load_json(f)
+        lists = load_json(f)
+        for k in ("test", "train", "val"):
+            n = cfg.get(f"n_{k}")
+            if not cfg.subjects and n is not None and n >= 0 and len(lists[k]) != n:
+                raise SystemExit(f"{f} holds {len(lists[k])} {k} subjects and config.yaml asks for n_{k}: {n}. Set paths.out "
+                                 "to a new folder for a run of a different size, or delete the file to draw again.")
+        return lists
     if cfg.subjects:                                             # DEV_MODE: the few subjects named in config.yaml
         lists = {k: list(v) for k, v in cfg.subjects.items()}
     else:
         s3 = s3 or hcp_client(cfg); rng = np.random.default_rng(cfg.seed)
         has = lambda rel, sid, dif: s3_exists(s3, HCP_BUCKET, f"{rel}/{sid}/T1w/{dif}/data.nii.gz")
-        take = lambda cand, n, ok: [s for s, _ in zip((s for s in cand if ok(s)), range(n))]
+        take = lambda cand, n, ok: list(itertools.islice((s for s in cand if ok(s)), None if n < 0 else n))
         prf = [s for s in prf_subject_ids(cfg) if not s.startswith("9999")]          # 9999xx are group averages
         test = take(list(rng.permutation(prf)), cfg.n_test, lambda s: has("HCP_1200", s, "Diffusion"))
         retest_all = s3_dirs(s3, HCP_BUCKET, "HCP_Retest/")
         rest = sorted(set(s3_dirs(s3, HCP_BUCKET, "HCP_1200/")) - set(prf) - set(retest_all))
-        tv = take(list(rng.permutation(rest)), cfg.n_train + cfg.n_val, lambda s: has("HCP_1200", s, "Diffusion"))
-        lists = dict(test=test, train=tv[:cfg.n_train], val=tv[cfg.n_train:], nsd=[f"subj{i:02d}" for i in range(1, cfg.n_nsd + 1)],
+        assert cfg.n_val >= 0, "n_val must be a number: validation subjects are set aside from the training pool"
+        tv = take(list(rng.permutation(rest)), -1 if cfg.n_train < 0 else cfg.n_val + cfg.n_train, lambda s: has("HCP_1200", s, "Diffusion"))
+        # validation first: runs with different n_train share their validation subjects, and each training list
+        # contains every smaller one
+        lists = dict(test=test, train=tv[cfg.n_val:], val=tv[:cfg.n_val], nsd=[f"subj{i:02d}" for i in range(1, (8 if cfg.n_nsd < 0 else cfg.n_nsd) + 1)],
                      t7=take(test, cfg.n_7t, lambda s: has("HCP_1200", s, "Diffusion_7T")),
                      retest=take(sorted(set(retest_all) & set(prf)), cfg.n_retest, lambda s: has("HCP_Retest", s, "Diffusion")))
         for k in ("test", "train", "val"):
-            assert len(lists[k]) == cfg[f"n_{k}"], f"only {len(lists[k])} {k} subjects found, n_{k} is {cfg[f'n_{k}']}"
+            assert cfg[f"n_{k}"] < 0 or len(lists[k]) == cfg[f"n_{k}"], f"only {len(lists[k])} {k} subjects found, n_{k} is {cfg[f'n_{k}']}"
+        print("subjects:", {k: len(v) for k, v in lists.items()}, flush=True)
     save_json(lists, f); return lists
 
 
@@ -395,7 +412,7 @@ def _gpu_fits(cfg, sessions, fits, device, err):
     try:
         for ses in sessions:
             for name, method in fits:
-                if not (sdir(cfg, ses) / f"fodf_{name}_{method}.npz").exists():
+                if not (sdir(cfg, ses, method) / f"fodf_{name}_{method}.npz").exists():
                     fodf(cfg, ses, name, method, device)
     except BaseException as e:
         err.append(e)

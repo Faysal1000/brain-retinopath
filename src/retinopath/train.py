@@ -343,7 +343,7 @@ def clear_outputs(cfg, variant, seed):
     """Remove cached fODFs, tractograms and scores of an earlier network with this name, so that a retrained
     network is never mixed with results of the old one."""
     pat = re.compile(rf"_net_{re.escape(variant)}_s{seed}([._+]|$)")
-    for f in cfg.P.cache.glob(f"*/*_net_{variant}_s{seed}*"):
+    for f in (cfg.P.out / "cache").glob(f"*/*_net_{variant}_s{seed}*"):
         if pat.search(f.name):
             f.unlink()
 
@@ -358,7 +358,7 @@ def load_trained(cfg, variant, seed, device):
 
 def net_fodf(cfg, ses, name, method, model, device):
     """Run a trained network on protocol `name` and cache its fODF under `method` (e.g. net_path_s0)."""
-    f = PL.sdir(cfg, ses) / f"fodf_{name}_{method}.npz"
+    f = PL.sdir(cfg, ses, method) / f"fodf_{name}_{method}.npz"
     if f.exists():
         return
     a = PL.load_anat(cfg, ses)
@@ -373,7 +373,7 @@ def net_fodf_all(cfg, sessions, names, method, model, device, desc=None):
     writing the fODFs take longer than the forward pass."""
     from concurrent.futures import ThreadPoolExecutor
     from tqdm.auto import tqdm
-    todo = [s for s in sessions if not all((PL.sdir(cfg, s) / f"fodf_{n}_{method}.npz").exists() for n in names)]
+    todo = [s for s in sessions if not all((PL.sdir(cfg, s, method) / f"fodf_{n}_{method}.npz").exists() for n in names)]
     PL.inputs_for(cfg, todo, names, cfg.model.input, f"{method}: inputs")
 
     def one(ses):
