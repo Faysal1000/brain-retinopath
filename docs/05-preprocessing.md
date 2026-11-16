@@ -133,15 +133,23 @@ Each protocol in `config.yaml` is simulated from the session's own full-quality 
 3. **Noise** (`add_rician`). With `snr` set, Rician noise of σ = (mean b=0 signal in white matter) / snr: a
    Gaussian sample is added to the signal and a second one in quadrature, √((s + n₁)² + n₂²). It is added after
    resampling, so it belongs to the coarse acquired voxels and is not averaged away. White matter here is the
-   voxels with wm > 0.9, or the purest 5% when a coarse grid has none that pure. The generator is seeded from
-   `seed` and the subject ID, so a subject always gets the same noise.
+   voxels with wm > 0.9, or the purest 5% when a coarse grid has none that pure. The generator is seeded with
+   `seed` + (subject ID mod 100,000), so a subject always gets the same noise. Protocols without `snr` (P1, P2 and
+   the sweeps) keep only the noise of the HCP scan, reduced by the low-pass filter.
 
 `NATIVE` is the scan as acquired (7T, NSD), without simulation. Protocols are recomputed when needed and not
 cached; their fODFs and network inputs are.
 
 ## Network input (`recon.signal_sh`, `pipeline.net_input`)
 
-The network reads the diffusion signal, not an fODF, so one network handles every protocol.
+**Main network** (`model.input: fodf`). The input is the classical `csd` fODF of the protocol (table below; the
+same fit the classical method is scored with), resampled to the 1.25 mm crop grid and cached as float16 in
+`in_<protocol>_fodf.npy` (45 channels). Every protocol gives an order-8 fODF, so one network handles them all.
+`pipeline.net_inputs_all` fits it for every training protocol of the training and validation subjects
+(notebook 02); for test, 7T and NSD sessions it comes from the classical fits made for scoring.
+
+**Signal input** (`model.input: signal`, the `signal` and `mlp` baselines). The per-shell SH of the diffusion
+signal:
 
 - For each shell in `shells_in` (1000, 2000, 3000), the signal divided by the mean b=0 is clipped to [0, 2] and
   fitted with real even spherical harmonics of order `sh_order_in` (4, 15 coefficients) by regularised least
@@ -150,13 +158,12 @@ The network reads the diffusion signal, not an fODF, so one network handles ever
   coefficients stay zero. A shell the protocol lacks is all zero. Voxels with no b=0 signal are zero.
 - The 3 × 15 = 45 channels are resampled trilinearly from the protocol grid to the 1.25 mm crop grid and cached
   as float16 in `in_<protocol>.npy`.
-- Seven anatomical channels are added at training and inference time (`pipeline.anat_channels`): wm, gm, csf
-  fractions, signed distance / 5 mm clipped to [−2, 2], and the three components of the normal field.
-- For the `fodrefine` baseline the input is the classical CSD fODF of the protocol on the crop grid
-  (`in_<protocol>_fodf.npy`, 45 channels, no anatomy).
 
-On NSD (b = 1500 and 3000) only the b = 3000 slot is filled; on HCP 7T (b = 1000 and 2000) the first two. The
-networks therefore use only the b = 3000 shell of NSD.
+On NSD (b = 1500 and 3000) only the b = 3000 slot is filled; on HCP 7T (b = 1000 and 2000) the first two, so the
+signal baselines use only the b = 3000 shell of NSD.
+
+For either input, seven anatomical channels are added at training and inference time (`pipeline.anat_channels`):
+wm, gm, csf fractions, signed distance / 5 mm clipped to [−2, 2], and the three components of the normal field.
 
 ## Classical fODFs (`recon.py`, `pipeline.fodf`)
 
@@ -167,7 +174,7 @@ networks therefore use only the b = 3000 shell of NSD.
   fit is zero-padded (`pad_order`), so all fODFs have the same 45 channels.
 - **Mask.** fODFs are fitted where wm > `wm_mask_thr` (0.05) on the protocol grid and are zero elsewhere.
 - **Order of a fit** (`max_order`). The highest even order up to 8 with at least 1.3 directions per coefficient:
-  64 directions → 8, 32 → 6, 20 → 4, 12 → 2.
+  64 directions → 8, 32 → 4, 20 → 4, 12 → 2.
 - **Single-fibre voxels** (`_top_fa`). The 300 voxels with the highest fractional anisotropy among those with
   wm > 0.95, from a tensor fitted on the shells up to b = 1500 (or the lowest shell when none is that low). They
   give the white-matter response functions.

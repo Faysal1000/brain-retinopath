@@ -4,11 +4,12 @@
 paper/
 RESEARCH_NOTES.md
 PROPOSAL.md
-scripts/make_notebooks.py
+docs/09-figures.md
 # rebuilt on each machine
 .venv/
 data/
 outputs/
+outputs_*/
 *.egg-info/
 __pycache__/
 .ipynb_checkpoints/

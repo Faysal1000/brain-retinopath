@@ -7,51 +7,60 @@ training batches are drawn, the training loop, running on several GPUs, and infe
 
 ## Task
 
-Input: one degraded scan of a training subject (any of `train_protocols`: P1, P2, P3, D32, T7) on the 1.25 mm crop
-grid ([05-preprocessing.md](05-preprocessing.md#network-input-reconsignal_sh-pipelinenet_input)). Target: the reference
+Input: the classical CSD fODF of one degraded scan of a training subject (any of `train_protocols`: P1, P2, P3,
+D32, T7) on the 1.25 mm crop grid, with seven anatomical channels
+([05-preprocessing.md](05-preprocessing.md#network-input-reconsignal_sh-pipelinenet_input)). Target: the reference
 fODF of the same subject (multi-shell CSD on the full data, 45 SH coefficients). The network never sees
 retinotopy, and no subject with retinotopy is used for training or validation.
 
 ## Architectures (`model.py`)
 
-**`UNet3D`** (main network). A residual 3D U-Net with `levels` (3) resolution levels and `base_channels` (48)
-channels at the top, doubling per level (48, 96, 192).
+**`FODRefine`** (main network, `kind: refine`). The output is `fODF_CSD + UNet3D(fODF_CSD, anatomy)`: the U-Net
+below reads the 45 coefficients of the classical CSD fODF of the degraded scan and the 7 anatomical channels
+(52 channels, 45 for `noanat`) and returns a correction to that fODF. The head of the U-Net is initialised to zero,
+so training starts from classical CSD and the network only adds what the data support. This is the idea of
+FOD-Net (Zeng et al. 2022). On development subjects it had a higher voxel-wise accuracy than the same U-Net
+reading the diffusion signal on every protocol, and a higher RSI on the best protocol (P1), where classical CSD is
+already close to the reference and the signal network fell below it ([09-development.md](09-development.md)).
+About 3.3 million parameters.
+
+**`UNet3D`**. A residual 3D U-Net with `levels` (3) resolution levels and `base_channels` (48) channels at the top,
+doubling per level (48, 96, 192).
 
 - `Block`: two 3×3×3 convolutions, each followed by GroupNorm (8 groups, 4 if the width is not a multiple of 8)
   and SiLU, plus a 1×1×1 convolution on the skip path when the width changes.
 - Down: one block per level, 2× average pooling between levels.
 - Up: trilinear upsampling to the size of the skip, concatenation with the skip, one block.
 - Head: 1×1×1 convolution to 45 output channels.
-- Input: 45 signal channels + 7 anatomical channels = 52 (45 for `noanat`). About 3.3 million parameters.
 
-The architecture is kept plain on purpose: the variants that test the loss differ only in the loss.
+Used inside `FODRefine`, and on its own (`kind: unet`) by the `signal` baseline, which maps the per-shell SH of the
+diffusion signal (45 channels) and the anatomy directly to the fODF.
 
-**`VoxelMLP`** (`mlp`). Four 1×1×1 convolutions of width 256 with SiLU and an output layer: a per-voxel network
-without spatial context, in the spirit of Karimi et al. (2021). About 0.22 million parameters.
+**`VoxelMLP`** (`mlp`). Four 1×1×1 convolutions of width 256 with SiLU and an output layer on the signal input: a
+per-voxel network without spatial context, in the spirit of Karimi et al. (2021). About 0.22 million parameters.
 
-**`FODRefine`** (`fodrefine`). The input is the classical CSD fODF of the degraded scan (45 channels); the output
-is `input + UNet3D(input)`. The head of the U-Net is initialised to zero, so the network starts as the identity
-(it returns CSD) and learns a correction. This follows the idea of FOD-Net (Zeng et al. 2022) with the same U-Net
-as the other variants, so only the input differs.
+The architecture is kept plain on purpose: `path` and `voxel` differ only in the loss.
 
-`build_model(cfg, kind)` builds `unet`, `mlp` or `refine` with the channel counts from `config.yaml`.
+`build_model(cfg, kind)` builds `refine`, `unet` or `mlp` with the channel counts from `config.yaml`.
 
 ## Soft tracker (`PathTracer`)
 
 A deterministic tracker whose positions are differentiable with respect to the fODF. All coordinates are voxel
 indices of the patch.
 
-1. **Amplitudes** (`amps`). The fODF is sampled trilinearly at each point (`sample_trilinear`): the eight
+1. **Amplitudes** (`amplitudes`). The fODF is sampled trilinearly at each point (`sample_trilinear`): the eight
    corners are looked up in a table with one row per voxel (`voxel_table`). Each lookup sends back a sparse
    gradient, and the lookups of all steps of a path are summed into one dense gradient of the volume; a dense
    gradient per step was most of the cost of the path loss. It runs on CUDA, MPS and CPU; points outside the
    volume are clamped to the border. The sampled fODF is evaluated on the 362 directions of `symmetric362`. Negative amplitudes are set to 0.
-2. **Start direction** (`start_dirs`). The sphere direction maximising amplitude × relu(cos to the inward
+2. **Start direction** (`start_directions`). The sphere direction maximising amplitude × relu(cos to the inward
    normal)². A hard choice, taken from the reference fODF and shared by the predicted and the reference path.
-3. **Step direction** (`step_dir`). Weights w = (amplitude / max amplitude)^`sharpen` (4) for directions within
-   `cone_deg` (45°) of the previous direction, 0 outside. The new direction is the normalised weighted mean of the
-   directions: a smooth stand-in for "follow the peak nearest to the current direction". If every weight is zero
-   the previous direction is kept.
+3. **Step direction** (`step_direction`). Weights w = (amplitude / max amplitude)^`sharpen` (4) for directions within
+   `cone_deg` (20°, the turning limit of the scoring tracker) of the previous direction, 0 outside. The new
+   direction is the normalised weighted mean of the directions: a smooth stand-in for "follow the peak nearest to
+   the current direction". The scoring tracker draws its directions near the same peak
+   (`tracking.pmf_threshold`, [07-scoring.md](07-scoring.md)). If every weight is zero the previous direction is
+   kept.
 4. **Trace** (`trace`). Euler steps of `step_mm` (0.625 mm, half a voxel) from the seeds; returns every position.
 
 ## Losses (`train.losses`, `model.path_loss`, `model.nonneg_loss`)
@@ -75,7 +84,7 @@ indices of the patch.
 - **Curriculum.** `steps` grows linearly from `steps_start` (4) to `steps_end` (40 steps, 25 mm) over the first
   half of training, then stays at 40.
 
-## Variants (`train.VARIANTS`, `apply_variant`)
+## Variants (`model.VARIANTS`, `apply_variant`)
 
 | Variant | Change from `path` | Question |
 |---|---|---|
@@ -84,11 +93,13 @@ indices of the patch.
 | `onestep` | Path loss replaced by (1 − cos) between the predicted and the reference step direction at each reference position, times step length × steps / 2 (a similar mm range) | Does accumulation along the path matter? |
 | `noanat` | No anatomical channels | Does the anatomy input matter? |
 | `wmseeds` | Path seeds at random white-matter voxels (wm > 0.9) with random start directions | Does seeding under the cortex matter? |
-| `mlp` | `VoxelMLP`, voxel loss only | A network without spatial context |
-| `fodrefine` | `FODRefine`, CSD fODF input, voxel loss only, no anatomy | fODF-to-fODF enhancement |
+| `signal` | `UNet3D` on the per-shell SH of the diffusion signal (no CSD input), voxel loss only | Does starting from classical CSD matter? |
+| `mlp` | `VoxelMLP` on the signal, voxel loss only | A network without spatial context |
 
 `path` and `voxel` are trained once per entry of `train_seeds`; the others with the first seed only
-(`jobs.train_commands`). A run is called `<variant>_s<seed>`.
+(`jobs.train_commands`). Several seeds are needed because tractography amplifies small fODF differences: two
+training seeds of the same network, with the same voxel-wise accuracy, give clearly different RSI for a single
+subject. The H3 test therefore compares `path` and `voxel` on their seed average per subject (notebook 09). A run is called `<variant>_s<seed>`.
 
 ## Training batches (`load_volumes`, `sample_batch`)
 
@@ -173,3 +184,7 @@ training. `net_fodf` sets the prediction to zero where wm ≤ `wm_mask_thr` and 
 `net_fodf_all` does this for all sessions: the inputs are made first, one session per core, then `gpu_jobs`
 sessions at a time run in threads that share the network.
 `trained_runs` returns the runs listed in `config.yaml` whose checkpoint is finished; only these are evaluated.
+
+`path_errors` follows the soft tracker through the fODF of classical CSD and of each network and through the
+reference fODF on the test subjects, with the settings of the path loss at full length; this path error is
+defined in [07-scoring.md](07-scoring.md#other-measures).

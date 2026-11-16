@@ -1,25 +1,34 @@
-"""Per-session caching: crop -> protocol -> fODF -> tractogram -> scores. Every step skips work already on disk.
-
-A "session" is one scan of one subject: kind 3T (main), 7T (same subject space, 7T diffusion), retest, or
-nsd / nsd2 (first / second NSD diffusion run). Cache files live in cfg.P.cache/<tag>/.
-
-A "method" names the fODF and, after a plus sign, the tracker: csd, rumba, net_path_s0, csd+prob. No suffix means
-particle-filter tracking.
+"""Cached steps per session (one scan: 3T, 7T, retest, nsd, nsd2): crop -> protocol -> fODF -> tractogram -> scores.
+A method is the fODF name plus an optional tracker suffix (csd, net_path_s0, csd+prob); no suffix = particle filter.
 """
+
 import copy, hashlib, itertools, json, shutil, threading
 import numpy as np
-from pathlib import Path
 from scipy.spatial import cKDTree
 from . import metrics as M, nsd
 from .atlas import atlas_files, atlas_key_source
 from .core import atomic, load_json, n_jobs, save_json
 from .degrade import make_protocol, to_grid
-from .download import HCP_BUCKET, anon_client, hcp_client, hcp_download, hcp_figure_keys, hcp_keys, osf_download, s3_dirs, s3_exists, s3_get, s3_size, s3_get_many, update_manifest, remove_stale_parts
+from .download import (
+    HCP_BUCKET,
+    anon_client,
+    hcp_client,
+    hcp_download,
+    hcp_figure_keys,
+    hcp_keys,
+    osf_download,
+    s3_dirs,
+    s3_exists,
+    s3_size,
+    s3_get_many,
+    update_manifest,
+    remove_stale_parts,
+)
 from .recon import fit_fodf, signal_sh
 from .subject import build_anat, load_dwi_crop, load_prf, prf_subject_ids, subject_dir
 from .track import area_pairs, density_map, endpoints, make_seeds, run_tracking
 
-CLASSICAL = {"csd": "msmt_csd", "rumba": "rumba"}       # label -> recon method ("csd" is multi-shell when it can be)
+CLASSICAL = {"csd": "msmt_csd", "rumba": "rumba"}  # label -> recon method ("csd" is multi-shell when it can be)
 
 
 def split_method(method):
@@ -30,153 +39,191 @@ def split_method(method):
 
 def session(sid, kind="3T"):
     """dict(sid, kind, release, dwi folder name, tag = cache folder name: sid for 3T, else sid_kind)."""
-    return dict(sid=str(sid), kind=kind, release="HCP_Retest" if kind == "retest" else "HCP_1200",
-                dwi="Diffusion_7T" if kind == "7T" else "Diffusion", tag=str(sid) if kind == "3T" else f"{sid}_{kind}")
+    return dict(
+        sid=str(sid),
+        kind=kind,
+        release="HCP_Retest" if kind == "retest" else "HCP_1200",
+        dwi="Diffusion_7T" if kind == "7T" else "Diffusion",
+        tag=str(sid) if kind == "3T" else f"{sid}_{kind}",
+    )
 
 
-def cfg_for(cfg, ses):
+def cfg_for(cfg, session):
     """Settings for this session: NSD has its own seed density and eccentricity limit (config.yaml, `nsd:`)."""
-    if not ses["kind"].startswith("nsd"):
+    if not session["kind"].startswith("nsd"):
         return cfg
-    c = copy.deepcopy(cfg); c["seeds_per_vertex"] = cfg.nsd.seeds_per_vertex; c.prf["ecc_max"] = cfg.nsd.ecc_max
-    return c
+    adjusted = copy.deepcopy(cfg)
+    adjusted["seeds_per_vertex"] = cfg.nsd.seeds_per_vertex
+    adjusted.prf["ecc_max"] = cfg.nsd.ecc_max
+    return adjusted
 
 
-def sdir(cfg, ses, method=""):
-    """Cache folder of a session. Files made from a trained network (methods net_*) belong to one run of the
-    experiment and go under the output folder, so runs with their own `paths.out` (for example different n_train)
-    share every other cached file but never each other's networks."""
+def sdir(cfg, session, method=""):
+    """Cache folder of a session; files of trained networks (net_*) go under the run's own output folder."""
     root = cfg.P.out / "cache" if method.startswith("net_") else cfg.P.cache
-    d = root / ses["tag"]; d.mkdir(parents=True, exist_ok=True); return d
+    folder = root / session["tag"]
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
 
 
 # ---------------------------------------------------------------- one session per core
-def each(cfg, fn, items, desc=None, gb=2.0):
-    """[fn(cfg, item) for item in items], one item per worker process: reading a scan, simulating a protocol,
-    tracking and scoring are single-threaded. The workers share cfg.n_jobs cores: with fewer items than cores, or
-    less than `gb` GB of free memory per worker, each worker gets the spare cores for its own fits. The progress
-    bar counts finished items."""
+def each(cfg, function, items, desc=None, gb=2.0):
+    """[function(cfg, item) for item in items], one item per worker process (at most one per `gb` GB of free
+    memory); spare cores go to each worker's own fits."""
     import psutil
     from joblib import Parallel, delayed
     from tqdm.auto import tqdm
-    items = list(items); total = n_jobs(cfg)
+
+    items = list(items)
+    total = n_jobs(cfg)
     if not items:
         return []
-    n = max(1, min(total, len(items), int(psutil.virtual_memory().available / 2**30 / gb)))
-    one = copy.deepcopy(cfg); one["n_jobs"] = max(1, total // n)
-    run = lambda i, x: (i, fn(one, x))
+    workers = max(1, min(total, len(items), int(psutil.virtual_memory().available / 2**30 / gb)))
+    worker_cfg = copy.deepcopy(cfg)
+    worker_cfg["n_jobs"] = max(1, total // workers)
+    run_one = lambda index, item: (index, function(worker_cfg, item))
     out = [None] * len(items)
-    for i, r in tqdm(Parallel(n_jobs=n, return_as="generator_unordered")(delayed(run)(i, x) for i, x in enumerate(items)),
-                     total=len(items), desc=desc):
-        out[i] = r
+    for index, result in tqdm(
+        Parallel(n_jobs=workers, return_as="generator_unordered")(
+            delayed(run_one)(index, item) for index, item in enumerate(items)
+        ),
+        total=len(items),
+        desc=desc,
+    ):
+        out[index] = result
     return out
 
 
 # ---------------------------------------------------------------- crop
-def prepare(cfg, ses, s3=None):
+def prepare(cfg, session, s3=None):
     """Download (if needed) and cache the occipital crop of one session."""
-    d = sdir(cfg, ses)
-    if (d / "anat.npz").exists() and (d / "dwi.npz").exists():
-        return d
-    if ses["kind"].startswith("nsd"):                            # nsd = first diffusion run, nsd2 = second run
-        run = 2 if ses["kind"] == "nsd2" else 1
-        nsd.nsd_download(cfg, ses["sid"], run)
-        anat = nsd.build_anat(cfg, ses["sid"], run)
-        dwi, bvals, bvecs, mask = nsd.load_dwi_crop(cfg, ses["sid"], anat, run)
-        atomic(d / "dwi.npz", lambda f: np.savez(f, dwi=dwi, bvals=bvals, bvecs=bvecs, mask=mask)); atomic(d / "anat.npz", lambda f: np.savez(f, **anat))
-        return d
-    raw = subject_dir(cfg, ses["sid"], ses["release"])
-    if not (raw / ses["dwi"] / "data.nii.gz").exists() or not (raw / "aparc+aseg.nii.gz").exists():
-        if ses["kind"] != "7T" or not (raw / "aparc+aseg.nii.gz").exists():
-            hcp_download(cfg, ses["sid"], "3T", ses["release"], s3)      # anatomy + 3T diffusion
-        if ses["kind"] == "7T":
-            hcp_download(cfg, ses["sid"], "7T", ses["release"], s3)
-    anat = build_anat(cfg, ses["sid"], ses["release"], ses["dwi"])
-    dwi, bvals, bvecs, mask = load_dwi_crop(cfg, ses["sid"], anat, ses["release"], ses["dwi"])
-    atomic(d / "dwi.npz", lambda f: np.savez(f, dwi=dwi, bvals=bvals, bvecs=bvecs, mask=mask))
-    atomic(d / "anat.npz", lambda f: np.savez(f, **anat))
+    folder = sdir(cfg, session)
+    if (folder / "anat.npz").exists() and (folder / "dwi.npz").exists():
+        return folder
+    if session["kind"].startswith("nsd"):  # nsd = first diffusion run, nsd2 = second run
+        run = 2 if session["kind"] == "nsd2" else 1
+        nsd.nsd_download(cfg, session["sid"], run)
+        anat = nsd.build_anat(cfg, session["sid"], run)
+        dwi, bvals, bvecs, mask = nsd.load_dwi_crop(cfg, session["sid"], anat, run)
+        atomic(folder / "dwi.npz", lambda temporary: np.savez(temporary, dwi=dwi, bvals=bvals, bvecs=bvecs, mask=mask))
+        atomic(folder / "anat.npz", lambda temporary: np.savez(temporary, **anat))
+        return folder
+    raw = subject_dir(cfg, session["sid"], session["release"])
+    if not (raw / session["dwi"] / "data.nii.gz").exists() or not (raw / "aparc+aseg.nii.gz").exists():
+        if session["kind"] != "7T" or not (raw / "aparc+aseg.nii.gz").exists():
+            hcp_download(cfg, session["sid"], "3T", session["release"], s3)  # anatomy + 3T diffusion
+        if session["kind"] == "7T":
+            hcp_download(cfg, session["sid"], "7T", session["release"], s3)
+    anat = build_anat(cfg, session["sid"], session["release"], session["dwi"])
+    dwi, bvals, bvecs, mask = load_dwi_crop(cfg, session["sid"], anat, session["release"], session["dwi"])
+    atomic(folder / "dwi.npz", lambda temporary: np.savez(temporary, dwi=dwi, bvals=bvals, bvecs=bvecs, mask=mask))
+    atomic(folder / "anat.npz", lambda temporary: np.savez(temporary, **anat))
     if not cfg.keep_raw:
-        shutil.rmtree(raw / ses["dwi"], ignore_errors=True)
-    return d
+        shutil.rmtree(raw / session["dwi"], ignore_errors=True)
+    return folder
 
 
 def prepare_all(cfg, sessions, desc="crops"):
     """prepare() for every session, in parallel: unpacking a scan takes one core for several seconds. 7T sessions
     come after the others, because a 7T crop uses the anatomy files its 3T session may still be fetching."""
-    each(cfg, prepare, [s for s in sessions if s["kind"] != "7T"], desc)
-    each(cfg, prepare, [s for s in sessions if s["kind"] == "7T"], f"{desc} (7T)")
+    each(cfg, prepare, [session for session in sessions if session["kind"] != "7T"], desc)
+    each(cfg, prepare, [session for session in sessions if session["kind"] == "7T"], f"{desc} (7T)")
 
 
-def load_anat(cfg, ses):
-    a = dict(np.load(sdir(cfg, ses) / "anat.npz"))
-    a["sid"], a["hemis"] = str(a["sid"]), str(a["hemis"])
-    return a
+def load_anat(cfg, session):
+    anat = dict(np.load(sdir(cfg, session) / "anat.npz"))
+    anat["sid"], anat["hemis"] = str(anat["sid"]), str(anat["hemis"])
+    return anat
 
 
-def load_dwi(cfg, ses):
-    z = np.load(sdir(cfg, ses) / "dwi.npz")
-    return z["dwi"], z["bvals"], z["bvecs"], z["mask"]
+def load_dwi(cfg, session):
+    stored = np.load(sdir(cfg, session) / "dwi.npz")
+    return stored["dwi"], stored["bvals"], stored["bvecs"], stored["mask"]
 
 
 def group_key_source(cfg, anat, sid="999999"):
-    """Group-average retinotopy placed on this subject's vertices: an atlas-style ('template') key."""
-    if "tpl_ang" in anat:                                        # NSD: carried over through the fsaverage sphere
-        return {f"prf_{q}": anat[f"tpl_{q}"] for q in ("ang", "ecc", "r2")}
+    """Group-average retinotopy on this subject's vertices (template key)."""
+    if "tpl_ang" in anat:  # NSD: carried over through the fsaverage sphere
+        return {f"prf_{quantity}": anat[f"tpl_{quantity}"] for quantity in ("ang", "ecc", "r2")}
     prf = load_prf(cfg, sid)
-    return {f"prf_{q}": np.concatenate([prf[h][q] for h in anat["hemis"]]) for q in ("ang", "ecc", "r2")}
+    return {
+        f"prf_{quantity}": np.concatenate([prf[hemi][quantity] for hemi in anat["hemis"]])
+        for quantity in ("ang", "ecc", "r2")
+    }
 
 
 # ---------------------------------------------------------------- protocol
-def protocol(cfg, ses, name, anat=None):
+def protocol(cfg, session, name, anat=None):
     """Simulated acquisition `name` (config.yaml) or the scan as acquired (name == 'NATIVE')."""
-    anat = anat if anat is not None else load_anat(cfg, ses)
-    dwi, bvals, bvecs, _ = load_dwi(cfg, ses)
+    anat = anat if anat is not None else load_anat(cfg, session)
+    dwi, bvals, bvecs, _ = load_dwi(cfg, session)
     if name == "NATIVE":
         return dict(dwi=dwi, bvals=bvals, bvecs=bvecs, affine=anat["affine"], pve=anat["pve"])
-    return make_protocol(dwi, bvals, bvecs, anat["affine"], anat["pve"], cfg.protocols[name], cfg.n_b0,
-                         seed=cfg.seed + int(ses["sid"]) % 100000)
+    return make_protocol(
+        dwi,
+        bvals,
+        bvecs,
+        anat["affine"],
+        anat["pve"],
+        cfg.protocols[name],
+        cfg.n_b0,
+        seed=cfg.seed + int(session["sid"]) % 100000,
+    )
 
 
 def anat_channels(anat):
     """7 anatomical input channels: wm, gm, csf, signed distance / 5 mm, inward normal (3)."""
-    return np.concatenate([anat["pve"], np.clip(anat["sdist"] / 5.0, -2, 2)[None], anat["normal_field"]]).astype(np.float32)
+    return np.concatenate([anat["pve"], np.clip(anat["sdist"] / 5.0, -2, 2)[None], anat["normal_field"]]).astype(
+        np.float32
+    )
 
 
-def net_input(cfg, ses, name, anat=None, source="signal"):
-    """Network input for protocol `name` on the crop grid, cached as float16.
-    source = signal: per-shell SH of the diffusion signal. source = fodf: the classical CSD fODF of that protocol
-    (input of the fODF-to-fODF baseline)."""
-    f = sdir(cfg, ses) / (f"in_{name}.npy" if source == "signal" else f"in_{name}_fodf.npy")
-    if f.exists():
-        return np.load(f)
-    anat = anat if anat is not None else load_anat(cfg, ses)
+def net_input(cfg, session, name, anat=None, source="signal"):
+    """Cached float16 network input of protocol `name` on the crop grid: the CSD fODF (source = fodf) or the
+    per-shell signal SH (source = signal)."""
+    path = sdir(cfg, session) / (f"in_{name}.npy" if source == "signal" else f"in_{name}_fodf.npy")
+    if path.exists():
+        return np.load(path)
+    anat = anat if anat is not None else load_anat(cfg, session)
     if source == "fodf":
-        x = on_ref_grid(fodf(cfg, ses, name, "csd", anat=anat), anat).astype(np.float16)
+        values = on_ref_grid(fodf(cfg, session, name, "csd", anat=anat), anat).astype(np.float16)
     else:
-        p = protocol(cfg, ses, name, anat)
-        x = signal_sh(p["dwi"], p["bvals"], p["bvecs"], cfg.shells_in, cfg.sh_order_in)
-        x = np.moveaxis(to_grid(np.moveaxis(x, 0, -1), anat["shape"]), -1, 0).astype(np.float16)
-    atomic(f, lambda t: np.save(t, x)); return x
+        simulated = protocol(cfg, session, name, anat)
+        values = signal_sh(simulated["dwi"], simulated["bvals"], simulated["bvecs"], cfg.shells_in, cfg.sh_order_in)
+        values = np.moveaxis(to_grid(np.moveaxis(values, 0, -1), anat["shape"]), -1, 0).astype(np.float16)
+    atomic(path, lambda temporary: np.save(temporary, values))
+    return values
 
 
 def _net_inputs(cfg, sid):
-    for p in cfg.train_protocols:
-        net_input(cfg, session(sid), p)
-        if "fodrefine" in cfg.variants:                          # classical fODF as input
-            net_input(cfg, session(sid), p, source="fodf")
+    from .model import input_sources
+
+    for name in cfg.train_protocols:
+        for source in sorted(input_sources(cfg)):
+            net_input(cfg, session(sid), name, source=source)
 
 
 def _inputs_of(cfg, job):
-    ses, names, source = job
+    session, names, source = job
     for name in names:
-        net_input(cfg, ses, name, source=source)
+        net_input(cfg, session, name, source=source)
 
 
 def inputs_for(cfg, sessions, names, source="signal", desc="network inputs"):
-    """Cached network inputs (`source`: signal or fodf) of these sessions and protocols, one session per worker;
-    sessions that have them all are skipped."""
-    f = lambda s, n: sdir(cfg, s) / (f"in_{n}.npy" if source == "signal" else f"in_{n}_fodf.npy")
-    each(cfg, _inputs_of, [(s, names, source) for s in sessions if not all(f(s, n).exists() for n in names)], desc)
+    """Cached network inputs of these sessions and protocols, one session per worker."""
+    input_file = lambda session, name: sdir(cfg, session) / (
+        f"in_{name}.npy" if source == "signal" else f"in_{name}_fodf.npy"
+    )
+    each(
+        cfg,
+        _inputs_of,
+        [
+            (session, names, source)
+            for session in sessions
+            if not all(input_file(session, name).exists() for name in names)
+        ],
+        desc,
+    )
 
 
 def net_inputs_all(cfg, sids):
@@ -185,29 +232,31 @@ def net_inputs_all(cfg, sids):
 
 
 # ---------------------------------------------------------------- fODF
-def fodf(cfg, ses, name, method, device="cpu", anat=None):
+def fodf(cfg, session, name, method, device="cpu", anat=None):
     """fODF of `method` on protocol `name`. Returns dict(sh, affine, pve). Methods: msmt_csd (reference), csd, rumba,
     csd_mppca (denoise first), csd_interp (interpolate the DWIs to the reference grid first)."""
-    f = sdir(cfg, ses, method) / f"fodf_{name}_{method}.npz"
-    if f.exists():
-        z = np.load(f); return dict(sh=z["sh"].astype(np.float32), affine=z["affine"], pve=z["pve"])
+    path = sdir(cfg, session, method) / f"fodf_{name}_{method}.npz"
+    if path.exists():
+        stored = np.load(path)
+        return dict(sh=stored["sh"].astype(np.float32), affine=stored["affine"], pve=stored["pve"])
     if method.startswith("net_"):
-        raise FileNotFoundError(f"{f.name}: network outputs are written by notebook 06 (train.net_fodf)")
-    anat = anat if anat is not None else load_anat(cfg, ses)
-    p = protocol(cfg, ses, name, anat)
+        raise FileNotFoundError(f"{path.name}: network outputs are written by notebook 06 (train.net_fodf)")
+    anat = anat if anat is not None else load_anat(cfg, session)
+    simulated = protocol(cfg, session, name, anat)
     if method == "csd_mppca":
         from dipy.denoise.localpca import mppca
-        p["dwi"] = mppca(p["dwi"], patch_radius=2).astype(np.float32)
+
+        simulated["dwi"] = mppca(simulated["dwi"], patch_radius=2).astype(np.float32)
     if method == "csd_interp":
-        p.update(dwi=to_grid(p["dwi"], anat["shape"]), affine=anat["affine"], pve=anat["pve"])
+        simulated.update(dwi=to_grid(simulated["dwi"], anat["shape"]), affine=anat["affine"], pve=anat["pve"])
     recon = cfg.ref_model if method == "msmt_csd" else CLASSICAL.get(method.split("_")[0], "msmt_csd")
-    sh = fit_fodf(p, p["pve"][0] > cfg.wm_mask_thr, recon, cfg, n_jobs(cfg), device)
-    return save_fodf(cfg, ses, name, method, sh, p["affine"], p["pve"])
+    sh = fit_fodf(simulated, simulated["pve"][0] > cfg.wm_mask_thr, recon, cfg, n_jobs(cfg), device)
+    return save_fodf(cfg, session, name, method, sh, simulated["affine"], simulated["pve"])
 
 
 def _fodf_file(cfg, job):
-    ses, name, method, device = job
-    fodf(cfg, ses, name, method, device)
+    session, name, method, device = job
+    fodf(cfg, session, name, method, device)
 
 
 def _gpu_fit(cfg, name, method, device):
@@ -218,308 +267,512 @@ def _gpu_fit(cfg, name, method, device):
 
 
 def fodf_all(cfg, sessions, name, method, device="cpu", desc="fODF"):
-    """fodf() for every session. Multi-shell CSD and RUMBA-SD are solved on the GPU: with a CUDA `device` those fits
-    run one after another in this process, because the solver keeps the GPU busy by itself and several at once only
-    take turns. Every other fit runs on the CPU, one session per core."""
-    todo = [s for s in sessions if not (sdir(cfg, s, method) / f"fodf_{name}_{method}.npz").exists()]
+    """fodf() for every session: GPU fits one after another in this process, the others one session per core."""
+    todo = [session for session in sessions if not (sdir(cfg, session, method) / f"fodf_{name}_{method}.npz").exists()]
     if _gpu_fit(cfg, name, method, device):
         from tqdm.auto import tqdm
-        for ses in tqdm(todo, desc=desc):
-            fodf(cfg, ses, name, method, device)
+
+        for session in tqdm(todo, desc=desc):
+            fodf(cfg, session, name, method, device)
     else:
-        each(cfg, _fodf_file, [(s, name, method, "cpu") for s in todo], desc)
+        each(cfg, _fodf_file, [(session, name, method, "cpu") for session in todo], desc)
 
 
-def save_fodf(cfg, ses, name, method, sh, affine, pve):
-    """Write the fODF as float16 and return it as fodf() reads it back, so that tracking gets the same numbers
-    from a new fit and from the cache."""
+def save_fodf(cfg, session, name, method, sh, affine, pve):
+    """Store the fODF as float16 and return it as read back, so new and cached fits track alike."""
     sh, pve = sh.astype(np.float16), pve.astype(np.float16)
-    atomic(sdir(cfg, ses, method) / f"fodf_{name}_{method}.npz", lambda f: np.savez(f, sh=sh, affine=affine, pve=pve))
+    atomic(
+        sdir(cfg, session, method) / f"fodf_{name}_{method}.npz",
+        lambda temporary: np.savez(temporary, sh=sh, affine=affine, pve=pve),
+    )
     return dict(sh=sh.astype(np.float32), affine=affine, pve=pve)
 
 
-def on_ref_grid(fo, anat):
+def on_ref_grid(fodf_volume, anat):
     """SH volume resampled to the crop grid (for voxel-wise comparison with the reference)."""
-    if tuple(fo["sh"].shape[1:]) == tuple(anat["shape"]):
-        return fo["sh"]
-    return np.moveaxis(to_grid(np.moveaxis(fo["sh"], 0, -1), anat["shape"]), -1, 0)
+    if tuple(fodf_volume["sh"].shape[1:]) == tuple(anat["shape"]):
+        return fodf_volume["sh"]
+    return np.moveaxis(to_grid(np.moveaxis(fodf_volume["sh"], 0, -1), anat["shape"]), -1, 0)
 
 
 # ---------------------------------------------------------------- tractogram
-def tract(cfg, ses, name, method, device="cpu", anat=None):
-    """Tractogram reduced to what the analysis needs: end vertices of V1-V3 streamlines, counts, density map,
-    and the streamlines themselves (for figures and test-retest overlap). Same seeds for every method."""
-    f = sdir(cfg, ses, method) / f"tract_{name}_{method}.npz"
-    if f.exists():
-        return dict(np.load(f))
-    anat = anat if anat is not None else load_anat(cfg, ses)
-    cfg = cfg_for(cfg, ses)
+def tract(cfg, session, name, method, device="cpu", anat=None, tag=""):
+    """V1-V3 tractogram: end vertices, counts, density map and streamlines; same seeds for every method. Tracked
+    again when the stored tracking settings differ. tag: cache-file suffix for other tracking settings."""
+    path = sdir(cfg, session, method) / f"tract_{name}_{method}{tag}.npz"
+    cfg = cfg_for(cfg, session)
+    settings = json.dumps([dict(cfg.tracking), cfg.seeds_per_vertex], sort_keys=True)
+    if path.exists():
+        cached = dict(np.load(path))
+        if str(cached.get("settings")) == settings:
+            return cached
+    anat = anat if anat is not None else load_anat(cfg, session)
     seeds, _ = make_seeds(anat, cfg, cfg.seed)
     if method == "proximity":
         out = proximity_tract(anat, cfg)
     else:
         base, tracker = split_method(method)
-        # Every method is tracked on the crop grid with the same tissue maps (fODFs of coarser protocols are
-        # interpolated), so differences between methods come from the fODF and not from the stopping rule.
-        fo = fodf(cfg, ses, name, base, device, anat)
-        sl = run_tracking(on_ref_grid(fo, anat), anat["affine"], anat["pve"], seeds, cfg, cfg.seed, 1, tracker)   # one thread: sessions run in parallel
-        ep = endpoints(sl, anat, cfg)
-        a, b, pair, keep = area_pairs(ep, anat)
-        sl = [sl[i] for i in keep]
-        out = dict(a=a, b=b, pair=pair, length=ep["length"][keep], n_seeds=len(seeds), n_streamlines=len(ep["v0"]),
-                   n_both_cortex=int(((ep["v0"] >= 0) & (ep["v1"] >= 0)).sum()),
-                   density=density_map(sl, anat["affine"], tuple(anat["shape"])).astype(np.float32),
-                   points=np.concatenate(sl) if sl else np.zeros((0, 3), np.float32),
-                   offsets=np.cumsum([0] + [len(s) for s in sl]))
-    atomic(f, lambda t: np.savez(t, **out)); return out
+        # every method on the crop grid with the same tissue maps
+        fodf_volume = fodf(cfg, session, name, base, device, anat)
+        streamlines = run_tracking(
+            on_ref_grid(fodf_volume, anat), anat["affine"], anat["pve"], seeds, cfg, cfg.seed, 1, tracker
+        )  # one thread: sessions run in parallel
+        ends = endpoints(streamlines, anat, cfg)
+        lower, higher, pair, keep = area_pairs(ends, anat)
+        streamlines = [streamlines[index] for index in keep]
+        out = dict(
+            a=lower,
+            b=higher,
+            pair=pair,
+            length=ends["length"][keep],
+            n_seeds=len(seeds),
+            n_streamlines=len(ends["v0"]),
+            n_both_cortex=int(((ends["v0"] >= 0) & (ends["v1"] >= 0)).sum()),
+            density=density_map(streamlines, anat["affine"], tuple(anat["shape"])).astype(np.float32),
+            points=np.concatenate(streamlines) if streamlines else np.zeros((0, 3), np.float32),
+            offsets=np.cumsum([0] + [len(streamline) for streamline in streamlines]),
+        )
+    out["settings"] = np.array(settings)
+    atomic(path, lambda temporary: np.savez(temporary, **out))
+    return out
 
 
 def proximity_tract(anat, cfg, scale_mm=5.0, max_mm=30.0):
-    """Lower bound that knows nothing about diffusion: every seed vertex is joined to a vertex of another area in the
-    same hemisphere, chosen with probability falling off with straight-line distance."""
+    """Diffusion-free lower bound: each seed vertex joined to a vertex of another area, p ~ exp(-distance / scale)."""
     rng = np.random.default_rng(cfg.seed)
-    roi = np.flatnonzero(anat["area"] > 0); tree = cKDTree(anat["verts"][roi]); A, B = [], []
-    for v in roi.repeat(cfg.seeds_per_vertex):
-        c = roi[tree.query_ball_point(anat["verts"][v], max_mm)]
-        c = c[(anat["area"][c] != anat["area"][v]) & (anat["hemi"][c] == anat["hemi"][v])]
-        if len(c):
-            w = np.exp(-np.linalg.norm(anat["verts"][c] - anat["verts"][v], axis=1) / scale_mm)
-            A.append(v); B.append(rng.choice(c, p=w / w.sum()))
-    A, B = np.array(A, int), np.array(B, int); swap = anat["area"][A] > anat["area"][B]
-    a, b = np.where(swap, B, A), np.where(swap, A, B)
-    return dict(a=a, b=b, pair=anat["area"][a] * 10 + anat["area"][b],
-                length=np.linalg.norm(anat["verts"][a] - anat["verts"][b], axis=1).astype(np.float32),
-                n_seeds=len(roi) * cfg.seeds_per_vertex, n_streamlines=len(a), n_both_cortex=len(a),
-                density=np.zeros(tuple(anat["shape"]), np.float32), points=np.zeros((0, 3), np.float32), offsets=np.zeros(1, int))
+    roi_vertices = np.flatnonzero(anat["area"] > 0)
+    tree = cKDTree(anat["verts"][roi_vertices])
+    seed_ends, partner_ends = [], []
+    for vertex in roi_vertices.repeat(cfg.seeds_per_vertex):
+        candidates = roi_vertices[tree.query_ball_point(anat["verts"][vertex], max_mm)]
+        candidates = candidates[
+            (anat["area"][candidates] != anat["area"][vertex]) & (anat["hemi"][candidates] == anat["hemi"][vertex])
+        ]
+        if len(candidates):
+            weights = np.exp(-np.linalg.norm(anat["verts"][candidates] - anat["verts"][vertex], axis=1) / scale_mm)
+            seed_ends.append(vertex)
+            partner_ends.append(rng.choice(candidates, p=weights / weights.sum()))
+    seed_ends, partner_ends = np.array(seed_ends, int), np.array(partner_ends, int)
+    swap = anat["area"][seed_ends] > anat["area"][partner_ends]
+    lower, higher = np.where(swap, partner_ends, seed_ends), np.where(swap, seed_ends, partner_ends)
+    return dict(
+        a=lower,
+        b=higher,
+        pair=anat["area"][lower] * 10 + anat["area"][higher],
+        length=np.linalg.norm(anat["verts"][lower] - anat["verts"][higher], axis=1).astype(np.float32),
+        n_seeds=len(roi_vertices) * cfg.seeds_per_vertex,
+        n_streamlines=len(lower),
+        n_both_cortex=len(lower),
+        density=np.zeros(tuple(anat["shape"]), np.float32),
+        points=np.zeros((0, 3), np.float32),
+        offsets=np.zeros(1, int),
+    )
 
 
 # ---------------------------------------------------------------- scores
-def scores(cfg, ses, name, method, ref=("REF", "msmt_csd"), anat=None, graph=None, group=None, atlas=None, device="cpu"):
+def scores(
+    cfg, session, name, method, ref=("REF", "msmt_csd"), anat=None, graph=None, group=None, atlas=None, device="cpu"
+):
     """One row of results for (session, protocol, method). group / atlas: alternative keys (group-average pRF maps,
     anatomical atlas); each adds its own RSI columns with the prefix template_ / atlas_."""
-    cfg = cfg_for(cfg, ses)
-    # cache key: analysis settings that change the scores but not the tractogram
-    sig = json.dumps([cfg.prf, cfg.n_null, cfg.seed, list(ref) if ref else None, graph is not None, group is not None,
-                      atlas is not None], sort_keys=True)
-    cache = sdir(cfg, ses, method) / f"scores_{name}_{method}_{hashlib.md5(sig.encode()).hexdigest()[:8]}.json"
-    if cache.exists():                                           # already scored with these analysis settings
+    cfg = cfg_for(cfg, session)
+    # cache key: the tracking settings and the analysis settings that change the scores but not the tractogram
+    signature = json.dumps(
+        [
+            dict(cfg.tracking),
+            cfg.seeds_per_vertex,
+            cfg.prf,
+            cfg.n_null,
+            cfg.seed,
+            list(ref) if ref else None,
+            graph is not None,
+            group is not None,
+            atlas is not None,
+        ],
+        sort_keys=True,
+    )
+    cache = (
+        sdir(cfg, session, method) / f"scores_{name}_{method}_{hashlib.md5(signature.encode()).hexdigest()[:8]}.json"
+    )
+    if cache.exists():  # already scored with these analysis settings
         return load_json(cache)
-    anat = anat if anat is not None else load_anat(cfg, ses)
-    t = tract(cfg, ses, name, method, device, anat)
-    row = dict(sid=ses["sid"], kind=ses["kind"], protocol=name, method=method, n_seeds=int(t["n_seeds"]),
-               n_streamlines=int(t["n_streamlines"]), n_both_cortex=int(t["n_both_cortex"]), n_pairs=int(len(t["a"])),
-               length_median=float(np.median(t["length"])) if len(t["a"]) else np.nan)
+    anat = anat if anat is not None else load_anat(cfg, session)
+    tractogram = tract(cfg, session, name, method, device, anat)
+    row = dict(
+        sid=session["sid"],
+        kind=session["kind"],
+        protocol=name,
+        method=method,
+        n_seeds=int(tractogram["n_seeds"]),
+        n_streamlines=int(tractogram["n_streamlines"]),
+        n_both_cortex=int(tractogram["n_both_cortex"]),
+        n_pairs=int(len(tractogram["a"])),
+        length_median=float(np.median(tractogram["length"])) if len(tractogram["a"]) else np.nan,
+    )
     if "prf_ang" in anat:
-        row.update(M.retinotopic_scores(anat, t["a"], t["b"], t["pair"], cfg, graph=graph, seed=cfg.seed))
+        row.update(
+            M.retinotopic_scores(
+                anat, tractogram["a"], tractogram["b"], tractogram["pair"], cfg, graph=graph, seed=cfg.seed
+            )
+        )
         row["noise_ceiling_deg"] = M.noise_ceiling(anat, cfg)
         for prefix, src in (("template", group), ("atlas", atlas)):
             if src is not None:
-                g = M.retinotopic_scores(anat, t["a"], t["b"], t["pair"], cfg, key=M.get_key(anat, cfg, group=src), seed=cfg.seed)
-                row.update({f"{prefix}_{k}": v for k, v in g.items() if k.startswith("rsi_ree_") and "geodesic" not in k})
-                row[f"{prefix}_n_valid"] = g["n_valid"]
-    if ref and ses["kind"] == "3T" and method != "proximity" and (name, method) != tuple(ref):
-        r = tract(cfg, ses, ref[0], ref[1], device, anat)
-        row["wdice_ref"] = M.weighted_dice(t["density"], r["density"])
-        row["badj_ref_mm"] = M.bundle_adjacency(t["density"], r["density"], cfg.ref_voxel)
-        fr, fp = fodf(cfg, ses, ref[0], ref[1], device, anat), fodf(cfg, ses, name, split_method(method)[0], device, anat)
-        row["acc"], row["peak_err_deg"] = M.voxel_metrics(on_ref_grid(fp, anat), fr["sh"], anat["pve"][0] > 0.5)
-    save_json(row, cache); return row
+                alternative = M.retinotopic_scores(
+                    anat,
+                    tractogram["a"],
+                    tractogram["b"],
+                    tractogram["pair"],
+                    cfg,
+                    key=M.get_key(anat, cfg, group=src),
+                    seed=cfg.seed,
+                )
+                row.update(
+                    {
+                        f"{prefix}_{key}": value
+                        for key, value in alternative.items()
+                        if key.startswith("rsi_ree_") and "geodesic" not in key
+                    }
+                )
+                row[f"{prefix}_n_valid"] = alternative["n_valid"]
+    if ref and session["kind"] == "3T" and method != "proximity" and (name, method) != tuple(ref):
+        reference = tract(cfg, session, ref[0], ref[1], device, anat)
+        row["wdice_ref"] = M.weighted_dice(tractogram["density"], reference["density"])
+        row["badj_ref_mm"] = M.bundle_adjacency(tractogram["density"], reference["density"], cfg.ref_voxel)
+        reference_fodf, predicted_fodf = fodf(cfg, session, ref[0], ref[1], device, anat), fodf(
+            cfg, session, name, split_method(method)[0], device, anat
+        )
+        row["acc"], row["peak_err_deg"] = M.voxel_metrics(
+            on_ref_grid(predicted_fodf, anat), reference_fodf["sh"], anat["pve"][0] > 0.5
+        )
+    save_json(row, cache)
+    return row
 
 
-def streamlines_of(t):
-    return [t["points"][i:j] for i, j in zip(t["offsets"][:-1], t["offsets"][1:])]
+def streamlines_of(tractogram):
+    return [
+        tractogram["points"][start:stop] for start, stop in zip(tractogram["offsets"][:-1], tractogram["offsets"][1:])
+    ]
 
 
 def retest_scores(cfg, sid, name="REF", method="msmt_csd", kinds=("3T", "retest")):
-    """Agreement of the V1-V3 tractogram between two scans of one person: bundle overlap and correlation of
-    per-vertex streamline-end counts. HCP retest has its own anatomy, so the second scan is first aligned rigidly
-    using corresponding surface vertices; the two NSD runs already share one space (kinds=("nsd", "nsd2"))."""
-    s1, s2 = session(sid, kinds[0]), session(sid, kinds[1])
-    a1, a2 = load_anat(cfg, s1), load_anat(cfg, s2)
-    t1, t2 = tract(cfg, s1, name, method, anat=a1), tract(cfg, s2, name, method, anat=a2)
-    roi = a1["area"] > 0; sl2, rms = streamlines_of(t2), 0.0
+    """Agreement of the V1-V3 tractograms of two scans of one person. HCP retest is first aligned rigidly on the
+    corresponding surface vertices; NSD runs (kinds=("nsd", "nsd2")) share one space."""
+    first, second = session(sid, kinds[0]), session(sid, kinds[1])
+    first_anat, second_anat = load_anat(cfg, first), load_anat(cfg, second)
+    first_tract, second_tract = tract(cfg, first, name, method, anat=first_anat), tract(
+        cfg, second, name, method, anat=second_anat
+    )
+    roi = first_anat["area"] > 0
+    second_streamlines, rms = streamlines_of(second_tract), 0.0
     if kinds[0] == "3T":
-        # Rigid retest -> test alignment (Kabsch). Both scans use the same fsLR 32k mesh, so vertex i is the same
-        # cortical point in both; V1-V3 vertices serve as point pairs. D prevents a reflection.
-        # rms = residual vertex distance (mm) after alignment.
-        P, Q = a2["verts"][roi], a1["verts"][roi]; pc, qc = P.mean(0), Q.mean(0)
-        U, _, Vt = np.linalg.svd((P - pc).T @ (Q - qc)); D = np.diag([1, 1, np.sign(np.linalg.det(Vt.T @ U.T))])
-        R = Vt.T @ D @ U.T
-        sl2 = [(s - pc) @ R.T + qc for s in sl2]; rms = float(np.sqrt((((P - pc) @ R.T + qc - Q) ** 2).sum(1).mean()))
-    d2 = density_map(sl2, a1["affine"], tuple(a1["shape"]))
-    c1 = np.bincount(np.r_[t1["a"], t1["b"]], minlength=len(roi))[roi]; c2 = np.bincount(np.r_[t2["a"], t2["b"]], minlength=len(roi))[roi]
-    return dict(sid=str(sid), protocol=name, method=method, wdice_retest=M.weighted_dice(t1["density"], d2),
-                badj_retest_mm=M.bundle_adjacency(t1["density"], d2, cfg.ref_voxel), align_rms_mm=rms,
-                vertex_count_r=float(np.corrcoef(c1, c2)[0, 1]) if c1.std() > 0 and c2.std() > 0 else np.nan)
+        # Kabsch fit of retest to test on the V1-V3 vertices (same fsLR mesh), no reflection; rms in mm
+        moving, fixed = second_anat["verts"][roi], first_anat["verts"][roi]
+        moving_centre, fixed_centre = moving.mean(0), fixed.mean(0)
+        left, _, right = np.linalg.svd((moving - moving_centre).T @ (fixed - fixed_centre))
+        reflection = np.diag([1, 1, np.sign(np.linalg.det(right.T @ left.T))])
+        rotation = right.T @ reflection @ left.T
+        second_streamlines = [
+            (streamline - moving_centre) @ rotation.T + fixed_centre for streamline in second_streamlines
+        ]
+        rms = float(np.sqrt((((moving - moving_centre) @ rotation.T + fixed_centre - fixed) ** 2).sum(1).mean()))
+    second_density = density_map(second_streamlines, first_anat["affine"], tuple(first_anat["shape"]))
+    first_counts = np.bincount(np.r_[first_tract["a"], first_tract["b"]], minlength=len(roi))[roi]
+    second_counts = np.bincount(np.r_[second_tract["a"], second_tract["b"]], minlength=len(roi))[roi]
+    return dict(
+        sid=str(sid),
+        protocol=name,
+        method=method,
+        wdice_retest=M.weighted_dice(first_tract["density"], second_density),
+        badj_retest_mm=M.bundle_adjacency(first_tract["density"], second_density, cfg.ref_voxel),
+        align_rms_mm=rms,
+        vertex_count_r=(
+            float(np.corrcoef(first_counts, second_counts)[0, 1])
+            if first_counts.std() > 0 and second_counts.std() > 0
+            else np.nan
+        ),
+    )
 
 
 # ---------------------------------------------------------------- subject lists and result tables
 def make_subject_lists(cfg, s3=None):
-    """Fixed, seeded subject lists saved to outputs/subjects.json. Test = subjects with measured 7T retinotopy.
-    Training and validation subjects come from the rest of HCP, so no test subject is ever seen in training.
-    A count of -1 in config.yaml takes every subject that qualifies; the sizes are printed when the lists are drawn.
-    The validation subjects do not depend on n_train, and a larger n_train adds subjects to the same list, so runs
-    that differ only in n_train can be compared."""
-    f = cfg.P.out / "subjects.json"
-    if f.exists():
-        lists = load_json(f)
-        for k in ("test", "train", "val"):
-            n = cfg.get(f"n_{k}")
-            if not cfg.subjects and n is not None and n >= 0 and len(lists[k]) != n:
-                raise SystemExit(f"{f} holds {len(lists[k])} {k} subjects and config.yaml asks for n_{k}: {n}. Set paths.out "
-                                 "to a new folder for a run of a different size, or delete the file to draw again.")
+    """Seeded subject lists, saved to outputs/subjects.json. Test subjects have measured 7T retinotopy; training and
+    validation subjects come from the rest of HCP. development_subjects are in no test list (test, t7, retest)."""
+    path = cfg.P.out / "subjects.json"
+    development = {str(sid) for sid in cfg.development_subjects or []}
+    if path.exists():
+        lists = load_json(path)
+        for group in ("test", "train", "val"):
+            wanted = cfg.get(f"n_{group}")
+            if not cfg.subjects and wanted is not None and wanted >= 0 and len(lists[group]) != wanted:
+                raise SystemExit(
+                    f"{path} holds {len(lists[group])} {group} subjects and config.yaml asks for n_{group}: "
+                    f"{wanted}. Set paths.out to a new folder for a run of a different size, or delete the "
+                    "file to draw again."
+                )
+        if not cfg.subjects and development & set(lists["test"] + lists.get("retest", [])):
+            raise SystemExit(f"{path} has development subjects in a test list; delete the file to draw again.")
         return lists
-    if cfg.subjects:                                             # DEV_MODE: the few subjects named in config.yaml
-        lists = {k: list(v) for k, v in cfg.subjects.items()}
+    if cfg.subjects:  # DEV_MODE: the few subjects named in config.yaml
+        lists = {group: list(sids) for group, sids in cfg.subjects.items()}
     else:
-        s3 = s3 or hcp_client(cfg); rng = np.random.default_rng(cfg.seed)
-        has = lambda rel, sid, dif: s3_exists(s3, HCP_BUCKET, f"{rel}/{sid}/T1w/{dif}/data.nii.gz")
-        take = lambda cand, n, ok: list(itertools.islice((s for s in cand if ok(s)), None if n < 0 else n))
-        prf = [s for s in prf_subject_ids(cfg) if not s.startswith("9999")]          # 9999xx are group averages
-        test = take(list(rng.permutation(prf)), cfg.n_test, lambda s: has("HCP_1200", s, "Diffusion"))
+        s3 = s3 or hcp_client(cfg)
+        rng = np.random.default_rng(cfg.seed)
+        has_scan = lambda release, sid, folder: s3_exists(s3, HCP_BUCKET, f"{release}/{sid}/T1w/{folder}/data.nii.gz")
+        take = lambda candidates, count, usable: list(
+            itertools.islice((sid for sid in candidates if usable(sid)), None if count < 0 else count)
+        )
+        with_retinotopy = [sid for sid in prf_subject_ids(cfg) if not sid.startswith("9999")]  # 9999xx: group averages
+        test = take(
+            list(rng.permutation(with_retinotopy)),
+            cfg.n_test,
+            lambda sid: sid not in development and has_scan("HCP_1200", sid, "Diffusion"),
+        )
         retest_all = s3_dirs(s3, HCP_BUCKET, "HCP_Retest/")
-        rest = sorted(set(s3_dirs(s3, HCP_BUCKET, "HCP_1200/")) - set(prf) - set(retest_all))
+        pool = sorted(set(s3_dirs(s3, HCP_BUCKET, "HCP_1200/")) - set(with_retinotopy) - set(retest_all))
         assert cfg.n_val >= 0, "n_val must be a number: validation subjects are set aside from the training pool"
-        tv = take(list(rng.permutation(rest)), -1 if cfg.n_train < 0 else cfg.n_val + cfg.n_train, lambda s: has("HCP_1200", s, "Diffusion"))
-        # validation first: runs with different n_train share their validation subjects, and each training list
-        # contains every smaller one
-        lists = dict(test=test, train=tv[cfg.n_val:], val=tv[:cfg.n_val], nsd=[f"subj{i:02d}" for i in range(1, (8 if cfg.n_nsd < 0 else cfg.n_nsd) + 1)],
-                     t7=take(test, cfg.n_7t, lambda s: has("HCP_1200", s, "Diffusion_7T")),
-                     retest=take(sorted(set(retest_all) & set(prf)), cfg.n_retest, lambda s: has("HCP_Retest", s, "Diffusion")))
-        for k in ("test", "train", "val"):
-            assert cfg[f"n_{k}"] < 0 or len(lists[k]) == cfg[f"n_{k}"], f"only {len(lists[k])} {k} subjects found, n_{k} is {cfg[f'n_{k}']}"
-        print("subjects:", {k: len(v) for k, v in lists.items()}, flush=True)
-    save_json(lists, f); return lists
+        trainval = take(
+            list(rng.permutation(pool)),
+            -1 if cfg.n_train < 0 else cfg.n_val + cfg.n_train,
+            lambda sid: has_scan("HCP_1200", sid, "Diffusion"),
+        )
+        # validation first, so it does not depend on n_train
+        n_nsd = 8 if cfg.n_nsd < 0 else cfg.n_nsd
+        lists = dict(
+            test=test,
+            train=trainval[cfg.n_val :],
+            val=trainval[: cfg.n_val],
+            nsd=[f"subj{number:02d}" for number in range(1, n_nsd + 1)],
+            t7=take(test, cfg.n_7t, lambda sid: has_scan("HCP_1200", sid, "Diffusion_7T")),
+            retest=take(
+                sorted(set(retest_all) & set(with_retinotopy)),
+                cfg.n_retest,
+                lambda sid: sid not in development and has_scan("HCP_Retest", sid, "Diffusion"),
+            ),
+        )
+        for group in ("test", "train", "val"):
+            wanted = cfg[f"n_{group}"]
+            assert (
+                wanted < 0 or len(lists[group]) == wanted
+            ), f"only {len(lists[group])} {group} subjects found, n_{group} is {wanted}"
+        print("subjects:", {group: len(sids) for group, sids in lists.items()}, flush=True)
+    save_json(lists, path)
+    return lists
 
 
 def robustness_rows(cfg, ses, variants):
-    """RSI of the reference tractogram of one session under other analysis settings (`variants`: name -> changes
-    to cfg.prf), with the key from each half of the pRF runs, and for dorsal / ventral / left / right streamlines."""
-    a = load_anat(cfg, ses); t = tract(cfg, ses, "REF", "msmt_csd", anat=a); rows = []
-    score = lambda c, m=slice(None), **k: M.retinotopic_scores(a, t["a"][m], t["b"][m], t["pair"][m], c, seed=cfg.seed, **k)
-    for name, ch in variants.items():
-        c = copy.deepcopy(cfg); c.prf.update(ch)
-        rows.append(dict(sid=ses["sid"], analysis=name, **score(c)))
+    """Reference RSI of one session under other settings (`variants`: name -> {"section.key": value}), each pRF
+    half, and dorsal / ventral / left / right subsets. tracking.* changes are tracked again from the same fODF."""
+    anat = load_anat(cfg, ses)
+    reference = tract(cfg, ses, "REF", "msmt_csd", anat=anat)
+    score = lambda adjusted, tractogram=reference, selected=slice(None), **options: M.retinotopic_scores(
+        anat,
+        tractogram["a"][selected],
+        tractogram["b"][selected],
+        tractogram["pair"][selected],
+        adjusted,
+        seed=cfg.seed,
+        **options,
+    )
+    rows = []
+    for name, changes in variants.items():
+        adjusted = copy.deepcopy(cfg)
+        for setting, value in changes.items():
+            section, key = setting.split(".")
+            adjusted[section][key] = value
+        tracking_changes = {key: value for key, value in changes.items() if key.startswith("tracking.")}
+        if tracking_changes:
+            tag = "".join(f"_{key.split('.')[1]}{value}" for key, value in tracking_changes.items())
+            rows.append(
+                dict(
+                    sid=ses["sid"],
+                    analysis=name,
+                    **score(adjusted, tract(adjusted, ses, "REF", "msmt_csd", anat=anat, tag=tag)),
+                )
+            )
+        else:
+            rows.append(dict(sid=ses["sid"], analysis=name, **score(adjusted)))
     for fit in (1, 2):
-        rows.append(dict(sid=ses["sid"], analysis=f"pRF half {fit}", **score(cfg, key=M.get_key(a, cfg, fit))))
-    for sub, m in (("dorsal", a["dorsal"][t["a"]]), ("ventral", ~a["dorsal"][t["a"]]), ("left", a["hemi"][t["a"]] == 0), ("right", a["hemi"][t["a"]] == 1)):
-        if m.sum() > 50:
-            rows.append(dict(sid=ses["sid"], analysis=sub, **score(cfg, m)))
+        rows.append(dict(sid=ses["sid"], analysis=f"pRF half {fit}", **score(cfg, key=M.get_key(anat, cfg, fit))))
+    for subset, selected in (
+        ("dorsal", anat["dorsal"][reference["a"]]),
+        ("ventral", ~anat["dorsal"][reference["a"]]),
+        ("left", anat["hemi"][reference["a"]] == 0),
+        ("right", anat["hemi"][reference["a"]] == 1),
+    ):
+        if selected.sum() > 50:
+            rows.append(dict(sid=ses["sid"], analysis=subset, **score(cfg, selected=selected)))
     return rows
 
 
-def _gpu_fits(cfg, sessions, fits, device, err):
+def _gpu_fits(cfg, sessions, fits, device, errors):
     try:
-        for ses in sessions:
+        for session in sessions:
             for name, method in fits:
-                if not (sdir(cfg, ses, method) / f"fodf_{name}_{method}.npz").exists():
-                    fodf(cfg, ses, name, method, device)
-    except BaseException as e:
-        err.append(e)
+                if not (sdir(cfg, session, method) / f"fodf_{name}_{method}.npz").exists():
+                    fodf(cfg, session, name, method, device)
+    except BaseException as error:
+        errors.append(error)
 
 
-def _grid_rows(cfg, ses, combos, kw, last=()):
-    anat = load_anat(cfg, ses)
+def _grid_rows(cfg, session, combos, options, last=()):
+    anat = load_anat(cfg, session)
     keyed = "prf_ang" in anat
-    graph = M.Geodesic(anat) if keyed else None                  # surface distances, shared by all combinations
+    graph = M.Geodesic(anat) if keyed else None  # surface distances, shared by all combinations
     group = group_key_source(cfg, anat) if keyed else None
-    atlas = atlas_key_source(cfg, anat, ses) if keyed else None
-    order = sorted(range(len(combos)), key=lambda i: (combos[i][0], split_method(combos[i][1])[0]) in last)
-    rows = {i: scores(cfg, ses, *combos[i], anat=anat, graph=graph, group=group, atlas=atlas, **kw) for i in order}
-    return [rows[i] for i in range(len(combos))]
+    atlas = atlas_key_source(cfg, anat, session) if keyed else None
+    order = sorted(range(len(combos)), key=lambda index: (combos[index][0], split_method(combos[index][1])[0]) in last)
+    rows = {
+        index: scores(cfg, session, *combos[index], anat=anat, graph=graph, group=group, atlas=atlas, **options)
+        for index in order
+    }
+    return [rows[index] for index in range(len(combos))]
 
 
-def run_grid(cfg, sessions, combos, name, device="cpu", **kw):
-    """Scores for every session x (protocol, method); writes outputs/results/<name>.csv and returns the table.
-    One session per worker process, which fits the missing fODFs, tracks and scores, each on one core. With a CUDA
-    `device` the GPU works at the same time: a thread fits the fODFs that have a GPU solver (_gpu_fit), from the
-    last session backwards, while the workers go forwards and leave those methods to the end of each session. A
-    worker that finds no file fits it on its core; both solvers give the same stored fODF, so who gets there first
-    does not change the result. Everything is cached, so a second call only reads the scores."""
+def run_grid(cfg, sessions, combos, name, device="cpu", **options):
+    """Scores for every session x (protocol, method), saved to outputs/results/<name>.csv. One session per worker;
+    with a CUDA device a thread also fits the GPU-solvable fODFs, from the last session backwards."""
     import pandas as pd, threading
-    fits = [f for f in dict.fromkeys((p, split_method(m)[0]) for p, m in combos)
-            if f[1] != "proximity" and not f[1].startswith("net_") and _gpu_fit(cfg, *f, device)]
-    for h in cfg.hemis:                                          # atlas files: fetched here, not by every worker
-        atlas_files(cfg, h)
-        if any(not s["kind"].startswith("nsd") for s in sessions):
-            nsd.bridge_file(cfg, h)
-    err = []; th = threading.Thread(target=_gpu_fits, args=(cfg, sessions[::-1], fits, device, err), daemon=True)
+
+    fits = [
+        fit
+        for fit in dict.fromkeys((name, split_method(method)[0]) for name, method in combos)
+        if fit[1] != "proximity" and not fit[1].startswith("net_") and _gpu_fit(cfg, *fit, device)
+    ]
+    for hemi in cfg.hemis:  # atlas files: fetched here, not by every worker
+        atlas_files(cfg, hemi)
+        if any(not session["kind"].startswith("nsd") for session in sessions):
+            nsd.bridge_file(cfg, hemi)
+    errors = []
+    thread = threading.Thread(target=_gpu_fits, args=(cfg, sessions[::-1], fits, device, errors), daemon=True)
     if fits:
-        th.start()
-    rows = each(cfg, lambda c, s: _grid_rows(c, s, combos, kw, set(fits)), sessions, name)
+        thread.start()
+    rows = each(
+        cfg, lambda worker_cfg, session: _grid_rows(worker_cfg, session, combos, options, set(fits)), sessions, name
+    )
     if fits:
-        th.join()
-    if err:
-        raise err[0]
-    df = pd.DataFrame([r for rs in rows for r in rs]); out = cfg.P.out / "results"; out.mkdir(exist_ok=True)
-    df.to_csv(out / f"{name}.csv", index=False); return df
+        thread.join()
+    if errors:
+        raise errors[0]
+    df = pd.DataFrame([row for session_rows in rows for row in session_rows])
+    folder = cfg.P.out / "results"
+    folder.mkdir(exist_ok=True)
+    df.to_csv(folder / f"{name}.csv", index=False)
+    return df
 
 
 # ---------------------------------------------------------------- download everything
 def download_all(cfg, workers=16, list_only=False, connections=256):
-    """Fetch every file the configured run needs: retinotopy results (OSF), HCP 3T / 7T / retest scans (S3, keys in
-    .env) and NSD (public S3). Complete files are skipped, so it can be stopped and run again. connections: 8 MB
-    parts fetched at once, over all files; workers: parallel size checks.
-    Returns the list of (key, bytes, etag) rows; with list_only=True nothing large is downloaded."""
+    """Fetch every file the configured run needs (OSF, HCP S3, NSD); complete files are skipped.
+    connections: 8 MB parts fetched at once; workers: parallel size checks. Returns (key, bytes, etag) rows."""
     osf_download(cfg)
     subjects = make_subject_lists(cfg)
-    print({k: len(v) for k, v in subjects.items()}, flush=True)
-    jobs = [("hcp", s, "3T", "HCP_1200") for s in subjects["test"] + subjects["train"] + subjects["val"] + subjects["retest"]]
-    jobs += [("hcp", s, "7T", "HCP_1200") for s in subjects["t7"]] + [("hcp", s, "3T", "HCP_Retest") for s in subjects["retest"]]
-    jobs += [("nsd", s, r, None) for s in subjects.get("nsd", []) for r in ((1, 2) if cfg.nsd.use_run2 else (1,))]
-    cached = lambda j: (cfg.P.cache / session(j[1], "retest" if j[3] == "HCP_Retest" else j[2])["tag"] / "dwi.npz").exists() \
-        if j[0] == "hcp" else (cfg.P.cache / f"{j[1]}_{'nsd2' if j[2] == 2 else 'nsd'}" / "dwi.npz").exists()
-    jobs = [j for j in dict.fromkeys(jobs) if not cached(j)]                 # already cropped: raw files not needed
+    print({key: len(entry) for key, entry in subjects.items()}, flush=True)
+    jobs = [
+        ("hcp", sid, "3T", "HCP_1200")
+        for sid in subjects["test"] + subjects["train"] + subjects["val"] + subjects["retest"]
+    ]
+    jobs += [("hcp", sid, "7T", "HCP_1200") for sid in subjects["t7"]] + [
+        ("hcp", sid, "3T", "HCP_Retest") for sid in subjects["retest"]
+    ]
+    jobs += [
+        ("nsd", sid, run, None) for sid in subjects.get("nsd", []) for run in ((1, 2) if cfg.nsd.use_run2 else (1,))
+    ]
+    cached = lambda job: (
+        (cfg.P.cache / session(job[1], "retest" if job[3] == "HCP_Retest" else job[2])["tag"] / "dwi.npz").exists()
+        if job[0] == "hcp"
+        else (cfg.P.cache / f"{job[1]}_{'nsd2' if job[2] == 2 else 'nsd'}" / "dwi.npz").exists()
+    )
+    jobs = [job for job in dict.fromkeys(jobs) if not cached(job)]  # already cropped: raw files not needed
     print(len(jobs), "scans to fetch or verify", flush=True)
     if list_only:
         return []
     s3, pub = hcp_client(cfg), anon_client()
-    remove_stale_parts(cfg.P.hcp); remove_stale_parts(cfg.P.nsd)
-    for h in "LR":
-        nsd.bridge_file(cfg, h); atlas_files(cfg, h)
-    files = [(s3, HCP_BUCKET, k, cfg.P.hcp / k) for j in jobs if j[0] == "hcp" for k in hcp_keys(j[1], j[2], j[3])]
-    files += [(pub, nsd.BUCKET, k, cfg.P.nsd / k) for j in jobs if j[0] == "nsd" for k in nsd.nsd_keys(j[1], j[2])]
+    remove_stale_parts(cfg.P.hcp)
+    remove_stale_parts(cfg.P.nsd)
+    for hemi in "LR":
+        nsd.bridge_file(cfg, hemi)
+        atlas_files(cfg, hemi)
+    files = [
+        (s3, HCP_BUCKET, key, cfg.P.hcp / key)
+        for job in jobs
+        if job[0] == "hcp"
+        for key in hcp_keys(job[1], job[2], job[3])
+    ]
+    files += [
+        (pub, nsd.BUCKET, key, cfg.P.nsd / key)
+        for job in jobs
+        if job[0] == "nsd"
+        for key in nsd.nsd_keys(job[1], job[2])
+    ]
     # inflated surfaces of the test subjects for the figures (notebook 10); fetched even when a scan is cropped
-    files += [(s3, HCP_BUCKET, k, cfg.P.hcp / k) for s in subjects["test"] for k in hcp_figure_keys(s)]
-    files = list({f[2]: f for f in files}.values())
+    files += [(s3, HCP_BUCKET, key, cfg.P.hcp / key) for sid in subjects["test"] for key in hcp_figure_keys(sid)]
+    files = list({file[2]: file for file in files}.values())
     rows = _fetch_files(files, workers, connections)
-    man = update_manifest(cfg, rows)
-    print(len(man), "files in data/manifest.json,", round(sum(v["bytes"] for v in man.values()) / 1e9, 1), "GB", flush=True)
+    manifest = update_manifest(cfg, rows)
+    print(
+        len(manifest),
+        "files in data/manifest.json,",
+        round(sum(entry["bytes"] for entry in manifest.values()) / 1e9, 1),
+        "GB",
+        flush=True,
+    )
     return rows
 
 
 def _fetch_files(files, workers, connections):
-    """Download the files (client, bucket, key, dest) not yet on disk through `connections` shared connections, with
-    one progress bar for all of them. Returns (key, bytes, etag) rows of the files on disk."""
+    """Download the missing (client, bucket, key, dest) files with one progress bar. Returns (key, bytes, etag)."""
     from concurrent.futures import ThreadPoolExecutor
     from tqdm.auto import tqdm
-    with ThreadPoolExecutor(workers) as ex:
-        sizes = list(tqdm(ex.map(lambda f: s3_size(*f), files), total=len(files), desc="checking files on disk"))
-    total, todo = sum(s[0] for s in sizes), sum(s[1] for s in sizes)
-    print(f"{len(files)} files, {total / 1e9:.1f} GB: {sum(s[1] > 0 for s in sizes)} files, {todo / 1e9:.1f} GB "
-          f"to download", flush=True)
-    need = [(*f, sz[0], sz[2]) for f, sz in zip(files, sizes) if sz[1]]
-    lock = threading.Lock(); done = [0]
-    # one bar for the whole download: bytes against everything still missing, with speed, time left and files done
-    with tqdm(total=todo, unit="B", unit_scale=True, unit_divisor=1024, desc="whole dataset", smoothing=0.05,
-              postfix=f"0/{len(need)} files") as bar:
-        def progress(n):
-            with lock: bar.update(n)
+
+    with ThreadPoolExecutor(workers) as executor:
+        sizes = list(
+            tqdm(executor.map(lambda file: s3_size(*file), files), total=len(files), desc="checking files on disk")
+        )
+    total, todo = sum(size[0] for size in sizes), sum(size[1] for size in sizes)
+    print(
+        f"{len(files)} files, {total / 1e9:.1f} GB: {sum(size[1] > 0 for size in sizes)} files, {todo / 1e9:.1f} GB "
+        f"to download",
+        flush=True,
+    )
+    need = [(*file, size[0], size[2]) for file, size in zip(files, sizes) if size[1]]
+    lock = threading.Lock()
+    done = [0]
+    with tqdm(
+        total=todo,
+        unit="B",
+        unit_scale=True,
+        unit_divisor=1024,
+        desc="whole dataset",
+        smoothing=0.05,
+        postfix=f"0/{len(need)} files",
+    ) as bar:
+
+        def progress(count):
+            with lock:
+                bar.update(count)
+
         def finished(row):
-            with lock: done[0] += 1; bar.set_postfix_str(f"{done[0]}/{len(need)} files")
+            with lock:
+                done[0] += 1
+                bar.set_postfix_str(f"{done[0]}/{len(need)} files")
+
         rows = s3_get_many(need, connections, progress, finished)
-    return rows + [(f[2], sz[0], sz[2]) for f, sz in zip(files, sizes) if not sz[1]]
+    return rows + [(file[2], size[0], size[2]) for file, size in zip(files, sizes) if not size[1]]
 
 
-if __name__ == "__main__":                       # python -m retinopath.pipeline [--dev] [--connections N] [--list]
+if __name__ == "__main__":  # python -m retinopath.pipeline [--dev] [--connections N] [--list]
     import argparse
     from .core import load_config
-    ap = argparse.ArgumentParser(description="Download all data needed by config.yaml")
-    ap.add_argument("--dev", action="store_true"); ap.add_argument("--workers", type=int, default=16)
-    ap.add_argument("--list", action="store_true", help="only build the subject lists and count the scans")
-    ap.add_argument("--connections", type=int, default=256, help="8 MB parts fetched at once, over all files")
-    a = ap.parse_args()
-    import resource                                    # each connection is an open file; Linux allows 1024 by default
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+
+    parser = argparse.ArgumentParser(description="Download all data needed by config.yaml")
+    parser.add_argument("--dev", action="store_true")
+    parser.add_argument("--workers", type=int, default=16)
+    parser.add_argument("--list", action="store_true", help="only build the subject lists and count the scans")
+    parser.add_argument("--connections", type=int, default=256, help="8 MB parts fetched at once, over all files")
+    arguments = parser.parse_args()
+    import resource  # each connection is an open file; Linux allows 1024 by default
+
+    _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (hard if hard != resource.RLIM_INFINITY else 65536, hard))
-    download_all(load_config(a.dev), a.workers, a.list, min(a.connections, 4096))
+    download_all(load_config(arguments.dev), arguments.workers, arguments.list, min(arguments.connections, 4096))

@@ -1,9 +1,11 @@
-# Recovering retinotopic V1–V2–V3 connectivity from clinical-grade diffusion MRI with path-consistent deep learning
+# Path-consistent learning preserves retinotopic V1–V2–V3 connectivity in learned enhancement of clinical-grade diffusion MRI
 
 Short association fibres between visual areas V1, V2 and V3 link cortical points that represent the same location
-of the visual field. High-quality diffusion MRI can show this organisation; clinical-grade scans mostly cannot.
-This repository tests whether a network that enhances fibre orientation estimates from clinical-grade scans can
-bring it back, and measures the answer against each person's own measured retinotopy.
+of the visual field. Diffusion MRI tractography can show this organisation, and classical CSD keeps most of it on
+clinical-grade scans. Networks that enhance fibre orientation estimates from such scans are trained and judged
+voxel by voxel. This repository tests what that enhancement does to retinotopic specificity when reference scans
+to train on are few, whether a path-consistency loss keeps it, and how both change with more training subjects,
+measured against each person's own measured retinotopy.
 
 The code name is `retinopath`. Background, method and design are in [docs/01-overview.md](docs/01-overview.md).
 
@@ -12,10 +14,9 @@ The code name is `retinopath`. Background, method and design are in [docs/01-ove
 | Path | Contents |
 |---|---|
 | `config.yaml` | All paths and settings, each documented in place |
-| `notebooks/` | The experiment, `00` to `09`, run in order |
+| `notebooks/` | The experiment, `00` to `10`, run in order |
 | `src/retinopath/` | Library used by the notebooks |
 | `scripts/` | Setup, data download, running the notebooks |
-| `AGENTS.md` | Rules for changing the code and keeping the docs in step |
 | `docs/` | Documentation (list below) |
 | `data/`, `outputs/` | Created at run time, not tracked |
 
@@ -75,8 +76,7 @@ Read the pages in order; each builds on the ones before it.
 6. [Network](docs/06-network.md): architectures, path-consistency loss, variants, training
 7. [Scoring](docs/07-scoring.md): tractography, retinotopic scores, statistics
 8. [Code](docs/08-code.md): files, modules, cached steps, outputs, file formats
-
-Rules for changing the code are in [AGENTS.md](AGENTS.md).
+9. [Development experiments](docs/09-development.md): how the network and the loss settings were chosen
 
 ## Data terms
 

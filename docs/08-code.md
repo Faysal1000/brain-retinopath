@@ -19,7 +19,6 @@ file the code writes.
 | `pyproject.toml` | Installs `src/retinopath` as an editable package, with `assets/` |
 | `.env.example` | Template for `.env`, which holds the HCP S3 keys |
 | `.gitignore` | Keeps secrets, data, outputs, the environment and private working files out of git |
-| `AGENTS.md` | Rules for changing the code and keeping the docs in step |
 
 ## Modules (`src/retinopath/`)
 
@@ -58,7 +57,7 @@ flowchart TD
 | `ROOT` | Project root |
 | `Cfg` | dict with attribute access (`cfg.model.lr`) |
 | `load_config(dev_mode)` | Reads `config.yaml`, copies the `dev:` or `full:` block over the top level, merges `extra_protocols` into `protocols`, resolves `paths` against the root (dev: `data/cache/dev`, `outputs/dev`), checks the cache settings |
-| `CACHED_KEYS`, `check_cache_settings` | The settings cached files depend on are stored in `data/cache/settings.json`; if the cache already holds a crop and one of them changed, loading stops and names the key |
+| `CACHED_KEYS`, `check_cache_settings` | The settings cached crops and fODFs depend on are stored in `data/cache/settings.json`; if the cache already holds a crop and one of them changed, loading stops and names the key |
 | `get_device` | CUDA, then MPS, then CPU; on Linux aarch64 also switches off PyTorch's oneDNN CPU kernels, whose generated code fails on large 3D inputs |
 | `seed_all` | Seeds Python, NumPy and PyTorch |
 | `n_jobs` | CPU workers from `n_jobs`; negative values count back from all cores |
@@ -154,18 +153,19 @@ together otherwise.
 | `N_ANAT` | Number of anatomical channels (7) |
 | `Block`, `UNet3D` | Residual 3D U-Net |
 | `VoxelMLP` | Per-voxel network |
-| `FODRefine` | Residual fODF-to-fODF network |
+| `FODRefine` | Main network: classical CSD fODF plus a U-Net correction |
 | `build_model` | Builds a network kind with the configured sizes |
+| `VARIANTS`, `apply_variant`, `input_sources` | The network variants and their settings; the inputs (fODF, signal) the configured variants read |
 | `voxel_table`, `sample_trilinear` | Table with one row per voxel whose lookups give sparse gradients; differentiable trilinear sampling of a volume at points |
 | `PathTracer` | Soft tracker: amplitudes, start direction, step direction, trace |
 | `path_loss` | Path-consistency loss (or the `onestep` direction loss) |
+| `path_error` | Distance (mm) between paths traced through a predicted and the reference fODF from the same seeds and start directions: mean over the counted points, at the last counted point, and the number of paths counted ([07-scoring.md](07-scoring.md#other-measures)) |
 | `nonneg_loss` | Penalty on negative fODF amplitudes |
 
 ### `train.py`: training and inference ([06-network.md](06-network.md))
 
 | Name | Does |
 |---|---|
-| `VARIANTS`, `apply_variant` | The network variants and their settings |
 | `run_dir` | `outputs/models/<variant>_s<seed>/`; `outputs/models/batch.json` holds the batch size shared by all runs |
 | `load_volumes`, `sample_batch` | Training volumes on the device; random patches with path seeds |
 | `net_in`, `losses` | Network input with or without anatomy; the total loss and its parts |
@@ -175,6 +175,7 @@ together otherwise.
 | `take_over`, `_alive` | One process per run folder |
 | `clear_outputs` | Removes cached outputs of an earlier network with the same name |
 | `load_trained`, `net_fodf`, `net_fodf_all`, `trained_runs` | Load a trained network, write its fODF for a session, the same for all sessions (`gpu_jobs` threads), list finished runs |
+| `path_errors` | `path_error` of every session × (protocol, method) against the reference fODF, one seed per V1–V3 vertex, tracer and path length of the training loss (`model.path`); cached per file as `patherr_<P>_<M>.json`, writes `outputs/results/<name>.csv` |
 
 ### `jobs.py`: running training runs ([06-network.md](06-network.md#running-training-runs-jobspy))
 
@@ -228,7 +229,7 @@ together otherwise.
 | `retest_scores` | Reproducibility between two scans |
 | `make_subject_lists` | Subject lists |
 | `run_grid` | Scores for sessions × (protocol, method), saved as a CSV |
-| `robustness_rows` | RSI of one session's reference tractogram under other analysis settings (notebook 08) |
+| `robustness_rows` | RSI of one session's reference tractogram under other analysis settings; other tracking settings are tracked again and cached (notebook 08) |
 | `download_all` | Every file a configuration needs (also `python -m retinopath.pipeline [--dev] [--connections N] [--list]`) |
 
 ### `stats.py`: statistics ([07-scoring.md](07-scoring.md#statistics-statspy-notebook-09))
@@ -255,6 +256,8 @@ flowchart LR
     N --> T
     T --> S[scores<br/>scores_P_M_hash.json]
     S --> G[run_grid<br/>outputs/results/name.csv]
+    F --> E[train.path_errors<br/>patherr_P_M.json]
+    N --> E
 ```
 
 - **Method names.** The part before `+` is the fODF: `msmt_csd`, `csd`, `rumba`, `csd_mppca`, `csd_interp`,
@@ -276,11 +279,14 @@ flowchart LR
 Drawn once with `seed` and saved to `outputs/subjects.json`; later calls read the file. A count of `-1` takes
 every subject that qualifies.
 
-- `test`: random subjects of the HCP 7T retinotopy release (group averages 9999xx excluded) that have 3T diffusion.
+- `test`: random subjects of the HCP 7T retinotopy release (group averages 9999xx excluded) that have 3T diffusion,
+  except `development_subjects`. An existing `subjects.json` whose `test` or `retest` list holds one of them stops
+  the run.
 - `train`, `val`: random HCP 1200 subjects in neither the retinotopy release nor the retest release that have 3T
   diffusion. The first `n_val` of the shuffled pool are validation, the next `n_train` training.
 - `t7`: the first `n_7t` test subjects that have 7T diffusion.
-- `retest`: subjects with retinotopy and a retest diffusion scan.
+- `retest`: the first `n_retest` subjects (sorted by ID) with retinotopy and a retest diffusion scan, except
+  `development_subjects`.
 - `nsd`: `subj01` … `subjNN` for `n_nsd`.
 
 In dev the lists are the subjects named under `dev: subjects:`. The function stops if fewer test, training or
@@ -306,15 +312,15 @@ through the cached steps above.
 |---|---|---|
 | `00_env_check` | Package versions, `.venv`, free disk, GPUs with memory, nodes; U-Net forward and backward pass on the device; HCP keys present (never printed) and bucket reachable | — |
 | `01_download_data` | `download_all`, `make_subject_lists` | `data/`, `outputs/subjects.json` |
-| `02_preprocessing` | Crops all sessions (test, training, validation, retest, 7T); reference fODF of the 3T and retest sessions (on the GPU if there is one); network inputs of every training protocol for the training and validation subjects, and CSD fODF inputs when `fodrefine` is a variant; quality-check figure | `data/cache/`, `qc_preprocessing.png` |
+| `02_preprocessing` | Crops all sessions (test, training, validation, retest, 7T); reference fODF of the 3T and retest sessions (on the GPU if there is one); network inputs of every training protocol for the training and validation subjects (the CSD fODF, and the signal SH when `signal` or `mlp` is a variant); quality-check figure | `data/cache/`, `qc_preprocessing.png` |
 | `03_retinotopy_metric` | Reference (`REF`, `msmt_csd`) and proximity bound on every test subject; RSI under the three keys; RSI per pair and axis | `h1_reference.csv`, `h1_rsi.png` |
 | `04_protocol_map` | `csd` on every protocol but REF; `rumba`, `csd_mppca`, `csd_interp`, `csd+prob` on the clinical-grade protocols; `msmt_csd+prob` and `rumba` on REF; method × protocol map | `protocols.csv`, `protocol_map.png` |
 | `05_training` | Every training run on every GPU and node; validation curves | `outputs/models/`, `outputs/logs/`, `training_curves.png` |
-| `06_inference_eval` | Every finished network on the clinical-grade protocols of every test subject; tracking and scores | `learned.csv` |
-| `07_external_tests` | HCP 7T: CSD and the `path`, `voxel`, `mlp`, `fodrefine` networks on the 7T scans. HCP retest: reference pipeline on the retest scans and test–retest agreement. NSD: crop, the same networks, CSD, `csd+prob` and proximity on run 1; CSD on run 2 and run-to-run agreement. No reference comparison (`ref=None`) | `external_7t.csv`, `retest_rsi.csv`, `retest_overlap.csv`, `external_nsd.csv`, `external_nsd_run2.csv`, `nsd_run_overlap.csv` |
-| `08_ablations_robustness` | Re-scores the reference tractograms with r² ≥ 5% and ≥ 20%, null tolerance 5% and 20%, eccentricity ≤ 5° and ≥ 1°, each pRF half, and dorsal, ventral, left and right subsets (more than 50 streamlines); ablation networks per variant and protocol | `robustness.csv` |
-| `09_stats_figures_tables` | Confirmatory and exploratory tests, pairwise comparisons of all methods, mixed model, other keys, summary tables (median [IQR]), external comparisons, hours logged | `confirmatory_tests.csv`, `exploratory_tests.csv`, `pairwise_tests.csv`, `mixed_model.csv`, `alternative_key_tests.csv`, `main_results.csv`, `external_results.csv`, `external_tests.csv`, `reproducibility.csv` |
-| `10_figures` | Paper figures, drawn only from cached anatomy and tractograms and the result tables; never tracks, trains or scores, so it can be re-run to restyle. Fig. 1: visual areas of the first test subject on the whole very inflated hemisphere (medial view), polar angle and eccentricity enlarged on V1–V3, and its reference streamlines on the white surface (medial-posterior view); without the inflated file panels a–c use the white surface. Fig. 2 (H1): like-to-like matrices of the reference tractogram (below) for eccentricity and polar angle, ratio by bin distance against the proximity bound, RSI per pair. Fig. 3: the V1–V2 streamlines of the same subject for reference, CSD, `voxel` and `path` on the first clinical protocol, coloured by V1-end eccentricity and by endpoint error, with that subject's RSI. Fig. 4 (H3): V1–V2 matrices of the same four; paired RSI per protocol; ACC against RSI for every method. Fig. 5 (H2): recovery of ACC against recovery of RSI, as in the H2 test. Fig. 6: HCP 7T, NSD, reproducibility. S1: every method; S2: robustness; S3: other keys; S4: FDR p-values of all pairwise comparisons | `fig1_*` … `fig6_*`, `figS1_*` … `figS4_*` (PDF and PNG, 300 dpi) |
+| `06_inference_eval` | Every finished network on the clinical-grade protocols of every test subject; tracking and scores; path error of classical CSD and every network on the same protocols (`train.path_errors`) | `learned.csv`, `path_error.csv` |
+| `07_external_tests` | HCP 7T: CSD and the `path`, `voxel`, `signal`, `mlp` networks on the 7T scans. HCP retest: reference pipeline on the retest scans and test–retest agreement. NSD: crop, the same networks, CSD, `csd+prob` and proximity on run 1; CSD on run 2 and run-to-run agreement. No reference comparison (`ref=None`) | `external_7t.csv`, `retest_rsi.csv`, `retest_overlap.csv`, `external_nsd.csv`, `external_nsd_run2.csv`, `nsd_run_overlap.csv` |
+| `08_ablations_robustness` | Re-scores the reference tractograms with r² ≥ 5% and ≥ 20%, null tolerance 5% and 20%, eccentricity ≤ 5° and ≥ 1°, eccentricity 1–6° in 10 bins, without the cortex within 15° of polar angle of a meridian, each pRF half, and dorsal, ventral, left and right subsets (more than 50 streamlines); tracks the reference again with a sampling threshold of 0.1 and with a 0.2 mm step (turning limit scaled to the same curvature) and scores them; ablation networks per variant and protocol | `robustness.csv` |
+| `09_stats_figures_tables` | Confirmatory tests, comparison with classical CSD (RSI, ACC and path error; reads `path_error.csv`), training size (the H3 tests and the comparison with classical CSD of this run and of every folder in `training_size_runs` that has them), exploratory tests, pairwise comparisons of all methods, mixed model, other keys, summary tables (median [IQR]), external comparisons, hours logged | `confirmatory_tests.csv`, `csd_comparison_tests.csv`, `training_size_tests.csv`, `exploratory_tests.csv`, `pairwise_tests.csv`, `mixed_model.csv`, `alternative_key_tests.csv`, `main_results.csv`, `external_results.csv`, `external_tests.csv`, `reproducibility.csv` |
+| `10_figures` | Paper figures, drawn only from cached anatomy and tractograms and the result tables; never tracks, trains or scores, so it can be re-run to restyle. Fig. 1: visual areas of the first test subject on the whole very inflated hemisphere (medial view), polar angle and eccentricity enlarged on V1–V3, and its reference streamlines on the white surface (medial-posterior view); without the inflated file panels a–c use the white surface. Fig. 2 (H1): like-to-like matrices of the reference tractogram (below) for eccentricity and polar angle, ratio by bin distance against the proximity bound, RSI per pair. Fig. 3: the V1–V2 streamlines of the same subject for reference, CSD, `voxel` and `path` on the main clinical protocol (the one on which classical CSD loses most RSI against the reference; chosen from classical results only), coloured by V1-end eccentricity and by endpoint error, with that subject's RSI. Fig. 4 (H3): V1–V2 matrices of the same four; paired RSI per protocol; ACC against RSI for every method. Fig. 5 (H2): recovery of ACC against recovery of RSI, as in the H2 test. Fig. 6: HCP 7T, NSD, reproducibility. Fig. 7: ACC, RSI and path error of classical CSD, `voxel` and `path` per subject on each clinical protocol, with the significant tests of `csd_comparison_tests.csv`. Fig. 8: median and interval of each test of `training_size_tests.csv` against the number of training subjects, one line per protocol. S1: every method; S2: robustness; S3: other keys; S4: FDR p-values of all pairwise comparisons | `fig1_*` … `fig8_*`, `figS1_*` … `figS4_*` (PDF and PNG, 300 dpi) |
 
 Result tables are written to `outputs/results/`, figures to `outputs/figures/` (`outputs/dev/…` in dev mode).
 
@@ -334,13 +340,15 @@ The ratio removes uneven coverage but not distance; the distance-matched RSI is 
 |---|---|
 | `anat.npz` | Crop geometry, tissue maps, surfaces, retinotopy (below) |
 | `dwi.npz` | `dwi` (X, Y, Z, N) float32, `bvals` (N,), `bvecs` (N, 3), `mask` (X, Y, Z) |
-| `in_<P>.npy` | (45, X, Y, Z) float16 signal SH on the crop grid |
-| `in_<P>_fodf.npy` | (45, X, Y, Z) float16 CSD fODF on the crop grid (`fodrefine` input) |
+| `in_<P>_fodf.npy` | (45, X, Y, Z) float16 CSD fODF on the crop grid (input of the main network) |
+| `in_<P>.npy` | (45, X, Y, Z) float16 signal SH on the crop grid (input of `signal` and `mlp`) |
 | `fodf_<P>_<M>.npz` | `sh` (45, x, y, z) float16, `affine`, `pve` (3, x, y, z) float16, on the protocol grid. Tracking always uses these stored values, also right after a fit |
 | `tract_<P>_<M>.npz` | V1–V3 tractogram (below) |
+| `tract_REF_msmt_csd_<setting><value>….npz` | Reference tractogram tracked with other tracking settings (notebook 08) |
 | `scores_<P>_<M>_<hash>.json` | One result row |
+| `patherr_<P>_<M>.json` | Path error against the reference fODF (below) |
 
-`outputs/cache/<tag>/` holds the same `fodf_`, `tract_` and `scores_` files for the `net_*` methods.
+`outputs/cache/<tag>/` holds the same `fodf_`, `tract_`, `scores_` and `patherr_` files for the `net_*` methods.
 
 `data/cache/settings.json` holds the cached settings; `data/manifest.json` every downloaded file with size and
 ETag.
@@ -375,6 +383,17 @@ ETag.
 | `n_seeds`, `n_streamlines`, `n_both_cortex` | Seeds; streamlines returned; streamlines with both ends on the white surface |
 | `density` | (X, Y, Z) streamlines per voxel |
 | `points`, `offsets` | Streamline *i* is `points[offsets[i]:offsets[i+1]]` (world mm) |
+| `settings` | `tracking` and `seeds_per_vertex` the file was made with (JSON) |
+
+**`patherr_<P>_<M>.json`**
+
+| Key | Meaning |
+|---|---|
+| `sid`, `protocol`, `method` | Identifiers |
+| `path_err_mm` | Mean distance (mm) between the method's and the reference path over the points before the reference path leaves white matter |
+| `path_end_err_mm` | Mean distance (mm) at the last such point |
+| `n_paths` | Paths with at least one counted point |
+| `settings` | `model.path.cone_deg`, `sharpen`, `steps_end`, `step_mm` and `tracking.seed_depth_mm` (JSON list); a file with other settings is computed again |
 
 ### Outputs (`outputs/`)
 
@@ -421,6 +440,8 @@ Score rows, with `<pair>` one of `V1-V2`, `V2-V3`, `V1-V3`, `all`:
 
 Reproducibility rows: `wdice_retest`, `badj_retest_mm`, `vertex_count_r`, `align_rms_mm`; `nsd_run_overlap.csv`
 adds `rsi_run1`, `rsi_run2`.
+
+Path error rows (`path_error.csv`): the keys of `patherr_<P>_<M>.json` without `settings`.
 
 Test rows: `n`, `median`, `hodges_lehmann`, `rank_biserial`, `p`, `ci_lo`, `ci_hi`; plus `p_holm` and
 `significant`, or `p_fdr`.

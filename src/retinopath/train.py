@@ -1,91 +1,101 @@
-"""Train one network.  python -m retinopath.train --variant path --seed 0 [--dev]
+"""Train one network: python -m retinopath.train --variant path --seed 0 [--dev] (or under torchrun for DDP)."""
 
-One GPU: ordinary training. Several GPUs: start with `torchrun --nproc_per_node=N -m retinopath.train ...`
-and the same code runs distributed (one process per GPU). All data sit on the GPU, so there is no loader bottleneck.
-"""
-import argparse, atexit, copy, math, os, random, re, signal, socket, time
+import argparse, atexit, copy, json, math, os, random, re, signal, socket, time
+
 # patch count and path length change during training; growing segments keep the allocator from fragmenting
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import numpy as np
 import torch
 import torch.nn.functional as F
 from .core import atomic, get_device, load_config, load_json, save_json, seed_all
-from .model import PathTracer, build_model, nonneg_loss, path_loss
+from .model import VARIANTS, PathTracer, apply_variant, build_model, nonneg_loss, path_error, path_loss
 from . import pipeline as PL
-
-VARIANTS = {                      # name -> changes to cfg.model (and network kind)
-    "path": {},                                           # proposed: voxel loss + path-consistency loss
-    "voxel": {"lambda_path": 0.0},                        # same network, voxel loss only (the H3 control)
-    "onestep": {"one_step": True},                        # ablation: no error accumulation along the path
-    "noanat": {"use_anat": False},                        # ablation: no anatomical input channels
-    "wmseeds": {"seed_where": "wm"},                      # ablation: path seeds anywhere in white matter
-    "mlp": {"lambda_path": 0.0, "kind": "mlp"},           # voxel-wise MLP baseline (no spatial context)
-    "fodrefine": {"lambda_path": 0.0, "use_anat": False, "input": "fodf", "kind": "refine"},   # fODF-to-fODF baseline
-}
-
-
-def apply_variant(cfg, variant):
-    v = dict(VARIANTS[variant]); kind = v.pop("kind", "unet")
-    if "one_step" in v:
-        cfg.model.path["one_step"] = v.pop("one_step")
-    cfg.model.update(v)
-    return kind
 
 
 def run_dir(cfg, variant, seed):
-    d = cfg.P.out / "models" / f"{variant}_s{seed}"; d.mkdir(parents=True, exist_ok=True); return d
+    folder = cfg.P.out / "models" / f"{variant}_s{seed}"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
 
 
 # ---------------------------------------------------------------- data on the device
-def load_volumes(cfg, sids, protocols, device):
+def load_volumes(cfg, subject_ids, protocols, device):
     """Per subject: inputs for every training protocol, reference fODF and anatomy on the device; V1-V3 surface
     seeds stay on the CPU, where patches are drawn."""
-    out, P = [], cfg.patch
-    for sid in sids:
-        ses = PL.session(sid); a = PL.load_anat(cfg, ses)
-        pad = [max(0, P - int(s)) for s in a["shape"]]                       # make every axis at least one patch long
-        padf = lambda x: F.pad(torch.as_tensor(np.asarray(x, np.float32)), (0, pad[2], 0, pad[1], 0, pad[0]))
-        v = np.flatnonzero(a["area"] > 0)
-        out.append(dict(
-            sid=str(sid), x={p: padf(PL.net_input(cfg, ses, p, a, cfg.model.input)).half().to(device) for p in protocols},
-            y=padf(PL.fodf(cfg, ses, "REF", "msmt_csd", anat=a)["sh"]).to(device),
-            anat=padf(PL.anat_channels(a)).to(device),
-            seeds=torch.as_tensor(a["verts_vox"][v] - cfg.tracking.seed_depth_mm / cfg.ref_voxel * a["normals_vox"][v]).float(),
-            inward=torch.as_tensor(-a["normals_vox"][v]).float()))
-        out[-1]["wm_idx"] = (out[-1]["anat"][0] > 0.9).nonzero().float().cpu()
-    return out
+    volumes, patch = [], cfg.patch
+    for sid in subject_ids:
+        session = PL.session(sid)
+        anat = PL.load_anat(cfg, session)
+        padding = [max(0, patch - int(length)) for length in anat["shape"]]  # make every axis at least one patch long
+        pad_volume = lambda array: F.pad(
+            torch.as_tensor(np.asarray(array, np.float32)), (0, padding[2], 0, padding[1], 0, padding[0])
+        )
+        seed_vertices = np.flatnonzero(anat["area"] > 0)
+        volumes.append(
+            dict(
+                sid=str(sid),
+                x={
+                    name: pad_volume(PL.net_input(cfg, session, name, anat, cfg.model.input)).half().to(device)
+                    for name in protocols
+                },
+                y=pad_volume(PL.fodf(cfg, session, "REF", "msmt_csd", anat=anat)["sh"]).to(device),
+                anat=pad_volume(PL.anat_channels(anat)).to(device),
+                seeds=torch.as_tensor(
+                    anat["verts_vox"][seed_vertices]
+                    - cfg.tracking.seed_depth_mm / cfg.ref_voxel * anat["normals_vox"][seed_vertices]
+                ).float(),
+                inward=torch.as_tensor(-anat["normals_vox"][seed_vertices]).float(),
+            )
+        )
+        volumes[-1]["wm_idx"] = (volumes[-1]["anat"][0] > 0.9).nonzero().float().cpu()
+    return volumes
 
 
-def sample_batch(cfg, vols, protocols, B, gen, device):
+def sample_batch(cfg, volumes, protocols, batch_size, generator, device):
     """B random cubic patches (random subject and protocol). 70% are centred near a V1-V3 seed (within +-patch/4),
     the rest anywhere. Returns stacked x, y, anat, path seeds and inward normals (B, S, 3) in patch-voxel units
     (at least 2 voxels from the border), and valid (B, S): all False when the patch holds no usable seed."""
-    P, S, m = cfg.patch, cfg.model.path.seeds_per_patch, cfg.model
-    X, Y, A, SD, IN, VA = [], [], [], [], [], []
-    for _ in range(B):                                   # positions are drawn on the CPU; only the patches are cut on the device
-        v = vols[int(torch.randint(len(vols), (1,), generator=gen))]
-        p = protocols[int(torch.randint(len(protocols), (1,), generator=gen))]
-        size = torch.tensor(v["y"].shape[1:])
-        if torch.rand(1, generator=gen) < 0.7 and len(v["seeds"]):               # most patches sit on visual cortex
-            c = v["seeds"][int(torch.randint(len(v["seeds"]), (1,), generator=gen))] + (torch.rand(3, generator=gen) - 0.5) * P / 2
+    patch, n_seeds, settings = cfg.patch, cfg.model.path.seeds_per_patch, cfg.model
+    inputs, targets, anatomy, seed_points, inward_normals, valid = [], [], [], [], [], []
+    for _ in range(batch_size):  # positions are drawn on the CPU; only the patches are cut on the device
+        volume = volumes[int(torch.randint(len(volumes), (1,), generator=generator))]
+        name = protocols[int(torch.randint(len(protocols), (1,), generator=generator))]
+        size = torch.tensor(volume["y"].shape[1:])
+        if torch.rand(1, generator=generator) < 0.7 and len(volume["seeds"]):  # most patches sit on visual cortex
+            centre = (
+                volume["seeds"][int(torch.randint(len(volume["seeds"]), (1,), generator=generator))]
+                + (torch.rand(3, generator=generator) - 0.5) * patch / 2
+            )
         else:
-            c = torch.rand(3, generator=gen) * size
-        o = torch.minimum(torch.clamp((c - P / 2).round().long(), min=0), size - P)
-        sl = (slice(None),) + tuple(slice(i, i + P) for i in o.tolist())
-        X.append(v["x"][p][sl].float()); Y.append(v["y"][sl]); A.append(v["anat"][sl])
-        pts = (v["wm_idx"] if m.seed_where == "wm" else v["seeds"]) - o
-        ok = ((pts > 2) & (pts < P - 3)).all(1).nonzero()[:, 0]
-        if len(ok):
-            pick = ok[torch.randint(len(ok), (S,), generator=gen)]
-            inw = F.normalize(torch.randn(S, 3, generator=gen), dim=-1) if m.seed_where == "wm" else v["inward"][pick]   # wm: ablation
-            SD.append(pts[pick]); IN.append(inw); VA.append(torch.ones(S, dtype=torch.bool))
+            centre = torch.rand(3, generator=generator) * size
+        origin = torch.minimum(torch.clamp((centre - patch / 2).round().long(), min=0), size - patch)
+        window = (slice(None),) + tuple(slice(start, start + patch) for start in origin.tolist())
+        inputs.append(volume["x"][name][window].float())
+        targets.append(volume["y"][window])
+        anatomy.append(volume["anat"][window])
+        points = (volume["wm_idx"] if settings.seed_where == "wm" else volume["seeds"]) - origin
+        usable = ((points > 2) & (points < patch - 3)).all(1).nonzero()[:, 0]
+        if len(usable):
+            picked = usable[torch.randint(len(usable), (n_seeds,), generator=generator)]
+            inward = (
+                F.normalize(torch.randn(n_seeds, 3, generator=generator), dim=-1)
+                if settings.seed_where == "wm"
+                else volume["inward"][picked]
+            )  # wm: ablation
+            seed_points.append(points[picked])
+            inward_normals.append(inward)
+            valid.append(torch.ones(n_seeds, dtype=torch.bool))
         else:
-            SD.append(torch.full((S, 3), P / 2.0)); IN.append(torch.zeros(S, 3)); VA.append(torch.zeros(S, dtype=torch.bool))
-    return [torch.stack(t) for t in (X, Y, A)] + [torch.stack(t).to(device) for t in (SD, IN, VA)]
+            seed_points.append(torch.full((n_seeds, 3), patch / 2.0))
+            inward_normals.append(torch.zeros(n_seeds, 3))
+            valid.append(torch.zeros(n_seeds, dtype=torch.bool))
+    return [torch.stack(parts) for parts in (inputs, targets, anatomy)] + [
+        torch.stack(parts).to(device) for parts in (seed_points, inward_normals, valid)
+    ]
 
 
-def net_in(cfg, x, anat):
-    return torch.cat([x, anat], 1) if cfg.model.use_anat else x
+def net_in(cfg, inputs, anat):
+    return torch.cat([inputs, anat], 1) if cfg.model.use_anat else inputs
 
 
 # ---------------------------------------------------------------- loss
@@ -93,43 +103,48 @@ def losses(cfg, model, tracer, batch, steps, scale, amp_dev):
     """Returns (total loss, {part: float}). Voxel MSE (inside wm > wm_mask_thr) and the non-negativity penalty are
     divided by scale**2 and scale (std of the training fODF coefficients); the path loss (mm) is added as a
     fraction of the path length steps * step_mm."""
-    x, y, anat, seeds, inward, valid = batch
-    m = cfg.model
-    with torch.autocast(amp_dev, enabled=bool(m.amp) and amp_dev == "cuda"):
-        pred = model(net_in(cfg, x, anat))
+    inputs, target, anat, seeds, inward, valid = batch
+    settings = cfg.model
+    with torch.autocast(amp_dev, enabled=bool(settings.amp) and amp_dev == "cuda"):
+        pred = model(net_in(cfg, inputs, anat))
     pred = pred.float()
-    wm = anat[:, :1]; mask = (wm > cfg.wm_mask_thr).float()
-    out = {"voxel": ((pred - y) ** 2 * mask).sum() / (mask.sum() * y.shape[1] + 1e-8) / scale ** 2,
-           "nonneg": nonneg_loss(tracer, pred, wm) / scale}
-    total = out["voxel"] + m.lambda_nonneg * out["nonneg"]
-    if m.lambda_path > 0:
-        sv = m.path.step_mm / cfg.ref_voxel
-        out["path_mm"] = path_loss(tracer, pred, y, wm, seeds, inward, valid, steps, sv, cfg.ref_voxel, m.path.one_step)
-        total = total + m.lambda_path * out["path_mm"] / (steps * m.path.step_mm)     # error as a fraction of path length
-    return total, {k: float(v.detach()) for k, v in out.items()}
+    wm = anat[:, :1]
+    mask = (wm > cfg.wm_mask_thr).float()
+    parts = {
+        "voxel": ((pred - target) ** 2 * mask).sum() / (mask.sum() * target.shape[1] + 1e-8) / scale**2,
+        "nonneg": nonneg_loss(tracer, pred, wm) / scale,
+    }
+    total = parts["voxel"] + settings.lambda_nonneg * parts["nonneg"]
+    if settings.lambda_path > 0:
+        step_vox = settings.path.step_mm / cfg.ref_voxel
+        parts["path_mm"] = path_loss(
+            tracer, pred, target, wm, seeds, inward, valid, steps, step_vox, cfg.ref_voxel, settings.path.one_step
+        )
+        total = total + settings.lambda_path * parts["path_mm"] / (
+            steps * settings.path.step_mm
+        )  # error as a fraction of path length
+    return total, {name: float(value.detach()) for name, value in parts.items()}
 
 
 @torch.no_grad()
-def predict(cfg, model, x, anat, device):
+def predict(cfg, model, inputs, anat, device):
     """Whole-crop inference. x: (C, X, Y, Z) numpy network input; anat: 7-channel numpy. Returns (45, X, Y, Z) float32."""
     model.eval()
-    t = torch.as_tensor(np.concatenate([x.astype(np.float32), anat]) if cfg.model.use_anat else x.astype(np.float32))[None].to(device)
-    k = 2 ** (cfg.model.levels - 1); pad = [(-s) % k for s in t.shape[2:]]
-    t = F.pad(t, (0, pad[2], 0, pad[1], 0, pad[0]))
+    tensor = torch.as_tensor(
+        np.concatenate([inputs.astype(np.float32), anat]) if cfg.model.use_anat else inputs.astype(np.float32)
+    )[None].to(device)
+    multiple = 2 ** (cfg.model.levels - 1)
+    padding = [(-length) % multiple for length in tensor.shape[2:]]
+    tensor = F.pad(tensor, (0, padding[2], 0, padding[1], 0, padding[0]))
     with torch.autocast(device.type, enabled=bool(cfg.model.amp) and device.type == "cuda"):
-        y = model(t)
-    s = x.shape[1:]
-    return y[0, :, :s[0], :s[1], :s[2]].float().cpu().numpy()
+        output = model(tensor)
+    crop_shape = inputs.shape[1:]
+    return output[0, :, : crop_shape[0], : crop_shape[1], : crop_shape[2]].float().cpu().numpy()
 
 
-def auto_batch(cfg, model, tracer, vols, protocols, device, scale, resumed=None, shared=None):
-    """Largest batch (8, 16, 32, 64) whose training step fits in 70% of GPU memory; 4 if even 8 does not.
-    A size is tried only if doubling the memory of the previous one stays under that limit, because a machine
-    whose GPU shares memory with the system can stall rather than report that it is full. Not on CUDA: 2. An
-    integer batch_size in config.yaml is used as given. A resumed run keeps the batch it started with (`resumed`).
-    All runs use one batch: the first run to need it searches with the reference network (`cfg` and `model` of the
-    `path` variant, path loss on, cuDNN autotuning off so timing cannot change the result) and writes it to
-    `shared`; every later run, ablations included, reads it from there."""
+def auto_batch(cfg, model, tracer, volumes, protocols, device, scale, resumed=None, shared=None):
+    """Largest batch (8, 16, 32, 64) whose step fits in 70% of GPU memory (4 if none; 2 off CUDA). Searched once
+    with the `path` network and saved to `shared`, so every run uses the same batch; `resumed` keeps a run's own."""
     if cfg.batch_size != "auto":
         return int(cfg.batch_size)
     if resumed:
@@ -138,29 +153,44 @@ def auto_batch(cfg, model, tracer, vols, protocols, device, scale, resumed=None,
         return 2
     if shared and shared.exists():
         return int(load_json(shared)["batch"])
-    bench = torch.backends.cudnn.benchmark; torch.backends.cudnn.benchmark = False
-    best, gen = 4, torch.Generator().manual_seed(0)
-    lam = cfg.model.lambda_path; cfg.model["lambda_path"] = 1.0
-    held = peak = torch.cuda.memory_allocated(device)                # volumes and weights
+    benchmark = torch.backends.cudnn.benchmark
+    torch.backends.cudnn.benchmark = False
+    best, generator = 4, torch.Generator().manual_seed(0)
+    lambda_path = cfg.model.lambda_path
+    cfg.model["lambda_path"] = 1.0
+    held = peak = torch.cuda.memory_allocated(device)  # volumes and weights
     limit = 0.7 * torch.cuda.mem_get_info(device)[1]
-    for b in (8, 16, 32, 64):
+    for size in (8, 16, 32, 64):
         if held + 2 * (peak - held) > limit:
             break
         try:
             torch.cuda.reset_peak_memory_stats(device)
-            total, _ = losses(cfg, model, tracer, sample_batch(cfg, vols, protocols, b, gen, device), cfg.model.path.steps_end, scale, "cuda")
-            total.backward(); model.zero_grad(set_to_none=True); del total
+            total, _ = losses(
+                cfg,
+                model,
+                tracer,
+                sample_batch(cfg, volumes, protocols, size, generator, device),
+                cfg.model.path.steps_end,
+                scale,
+                "cuda",
+            )
+            total.backward()
+            model.zero_grad(set_to_none=True)
+            del total
             peak = torch.cuda.max_memory_allocated(device)
             if peak > limit:
                 break
-            best = b
+            best = size
         except torch.OutOfMemoryError:
             break
-    cfg.model["lambda_path"] = lam; torch.backends.cudnn.benchmark = bench; torch.cuda.empty_cache()
+    cfg.model["lambda_path"] = lambda_path
+    torch.backends.cudnn.benchmark = benchmark
+    torch.cuda.empty_cache()
     if shared:
-        try:                                                     # the first run to finish the search sets it
-            fd = os.open(shared, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-            with os.fdopen(fd, "w") as f: f.write(f'{{"batch": {best}}}')
+        try:  # the first run to finish the search sets it
+            descriptor = os.open(shared, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            with os.fdopen(descriptor, "w") as handle:
+                handle.write(f'{{"batch": {best}}}')
         except FileExistsError:
             pass
         best = int(load_json(shared)["batch"])
@@ -172,167 +202,285 @@ def train(cfg, variant="path", seed=0, subjects=None):
     """Train one (variant, seed) into outputs/models/<variant>_s<seed>/ (last.pt, log.json); resumes from last.pt.
     Progress = max(step / (epochs * steps_per_epoch), hours / max_train_hours); it drives the cosine learning rate
     and the path-length curriculum, and training ends at 1. SIGINT/SIGTERM save a checkpoint and exit with 130."""
-    ref_cfg = copy.deepcopy(cfg); apply_variant(ref_cfg, "path")         # the network the batch size is set with
+    reference_cfg = copy.deepcopy(cfg)
+    reference_kind = apply_variant(reference_cfg, "path")  # the network the batch size is set with
     kind = apply_variant(cfg, variant)
-    ddp = "LOCAL_RANK" in os.environ
-    rank, world = (int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"])) if ddp else (0, 1)
-    if ddp:
-        device = torch.device("cuda", int(os.environ["LOCAL_RANK"])) if torch.cuda.is_available() else torch.device("cpu")
+    distributed = "LOCAL_RANK" in os.environ
+    rank, world = (int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"])) if distributed else (0, 1)
+    if distributed:
+        device = (
+            torch.device("cuda", int(os.environ["LOCAL_RANK"])) if torch.cuda.is_available() else torch.device("cpu")
+        )
         if device.type == "cuda":
             torch.cuda.set_device(device)
         torch.distributed.init_process_group("nccl" if device.type == "cuda" else "gloo")
     else:
         device = get_device()
-    if not cfg.dev_mode and device.type != "cuda":               # days on the CPU instead of hours on the GPU
-        raise SystemExit("the full configuration trains on a CUDA GPU and torch finds none: check nvidia-smi and that "
-                         "the CUDA build of torch is installed (python -c 'import torch; print(torch.cuda.is_available())')")
+    if not cfg.dev_mode and device.type != "cuda":  # days on the CPU instead of hours on the GPU
+        raise SystemExit(
+            "the full configuration trains on a CUDA GPU and torch finds none: check nvidia-smi and that "
+            "the CUDA build of torch is installed (python -c 'import torch; print(torch.cuda.is_available())')"
+        )
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = True
     seed_all(cfg.seed + 1000 * seed + rank)
-    out = run_dir(cfg, variant, seed); ck = out / "last.pt"
-    take_over(out / "pid", owner=rank == 0)
-    prev = torch.load(ck, map_location="cpu", weights_only=False) if ck.exists() else None
-    total_steps = cfg.epochs * cfg.steps_per_epoch; cap = cfg.max_train_hours
-    if prev and prev["meta"].get("steps", total_steps) != total_steps:           # every network trains equally long
-        raise SystemExit(f"{out.name} was started with {prev['meta']['steps']} training steps and config.yaml now gives "
-                         f"{total_steps}; delete {out} to train it again")
-    if prev and prev["state"]["done"]:
-        return out                                               # this run already finished
-    if prev is None and rank == 0:
+    folder = run_dir(cfg, variant, seed)
+    checkpoint = folder / "last.pt"
+    take_over(folder / "pid", owner=rank == 0)
+    previous = torch.load(checkpoint, map_location="cpu", weights_only=False) if checkpoint.exists() else None
+    total_steps = cfg.epochs * cfg.steps_per_epoch
+    max_hours = cfg.max_train_hours
+    if previous and previous["meta"].get("steps", total_steps) != total_steps:  # every network trains equally long
+        raise SystemExit(
+            f"{folder.name} was started with {previous['meta']['steps']} training steps and config.yaml now gives "
+            f"{total_steps}; delete {folder} to train it again"
+        )
+    if previous and previous["state"]["done"]:
+        return folder  # this run already finished
+    if previous is None and rank == 0:
         clear_outputs(cfg, variant, seed)
     subjects = subjects or load_json(cfg.P.out / "subjects.json")
-    protos = list(cfg.train_protocols)
-    tr = load_volumes(cfg, subjects["train"], protos, device)
-    va = load_volumes(cfg, subjects["val"], protos, device)
-    scale = float(torch.cat([v["y"][:, v["anat"][0] > 0.5].flatten() for v in tr]).std())      # fODF coefficient scale
+    protocols = list(cfg.train_protocols)
+    train_volumes = load_volumes(cfg, subjects["train"], protocols, device)
+    val_volumes = load_volumes(cfg, subjects["val"], protocols, device)
+    scale = float(
+        torch.cat([volume["y"][:, volume["anat"][0] > 0.5].flatten() for volume in train_volumes]).std()
+    )  # fODF coefficient scale
 
     model = build_model(cfg, kind).to(device)
     if cfg.model.compile:
         model = torch.compile(model)
     tracer = PathTracer(cfg.sh_order_out, cfg.model.path.cone_deg, cfg.model.path.sharpen).to(device)
-    shared = cfg.P.out / "models" / "batch.json"
-    if prev or cfg.batch_size != "auto" or device.type != "cuda" or shared.exists():
-        B = auto_batch(cfg, model, tracer, tr, protos, device, scale, prev["meta"]["batch"] if prev else None, shared)
+    shared_batch = cfg.P.out / "models" / "batch.json"
+    if previous or cfg.batch_size != "auto" or device.type != "cuda" or shared_batch.exists():
+        batch_size = auto_batch(
+            cfg,
+            model,
+            tracer,
+            train_volumes,
+            protocols,
+            device,
+            scale,
+            previous["meta"]["batch"] if previous else None,
+            shared_batch,
+        )
     else:
-        probe = build_model(ref_cfg, "unet").to(device)            # inputs of the reference network (fodrefine differs)
-        pv = tr if ref_cfg.model.input == cfg.model.input else load_volumes(ref_cfg, subjects["train"], protos, device)
-        B = auto_batch(ref_cfg, probe, tracer, pv, protos, device, scale, None, shared)
-        del probe, pv; torch.cuda.empty_cache()
-    seed_all(cfg.seed + 1000 * seed + rank)                    # the batch search draws random numbers; start every run alike
-    net = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index] if device.type == "cuda" else None) if ddp else model
-    lr0 = cfg.model.lr * world
-    opt = torch.optim.AdamW(net.parameters(), lr=lr0, weight_decay=cfg.model.weight_decay)
+        probe = build_model(reference_cfg, reference_kind).to(device)  # the batch is set with the path network
+        probe_volumes = (
+            train_volumes
+            if reference_cfg.model.input == cfg.model.input
+            else load_volumes(reference_cfg, subjects["train"], protocols, device)
+        )
+        batch_size = auto_batch(
+            reference_cfg, probe, tracer, probe_volumes, protocols, device, scale, None, shared_batch
+        )
+        del probe, probe_volumes
+        torch.cuda.empty_cache()
+    seed_all(cfg.seed + 1000 * seed + rank)  # the batch search draws random numbers; start every run alike
+    network = (
+        torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index] if device.type == "cuda" else None)
+        if distributed
+        else model
+    )
+    base_lr = cfg.model.lr * world
+    optimizer = torch.optim.AdamW(network.parameters(), lr=base_lr, weight_decay=cfg.model.weight_decay)
     scaler = torch.amp.GradScaler(enabled=bool(cfg.model.amp) and device.type == "cuda")
     state = dict(step=0, hours=0.0, log=[], done=False)
-    if prev:                                                                    # resume
-        model.load_state_dict(prev["model"]); opt.load_state_dict(prev["opt"]); scaler.load_state_dict(prev["scaler"])
-        state = prev["state"]
-    # one process: a resumed run continues every random stream where it stopped, so it draws the same patches as a
-    # run never stopped. Several processes (torchrun): only rank 0 saves, so the others restart their streams.
-    gen = torch.Generator().manual_seed(cfg.seed + 1000 * seed + rank + (state["step"] if ddp else 0))
-    if prev and prev.get("rng") and not ddp:
-        r = prev["rng"]
-        gen.set_state(r["gen"]); torch.set_rng_state(r["torch"]); np.random.set_state(r["numpy"]); random.setstate(r["python"])
-        if device.type == "cuda" and r.get("cuda") is not None:
-            torch.cuda.set_rng_state(r["cuda"], device)
-    vgen = lambda: torch.Generator().manual_seed(123)
-    t0 = last_ck = time.time(); h0 = state["hours"]; pc = cfg.model.path
+    if previous:  # resume
+        model.load_state_dict(previous["model"])
+        optimizer.load_state_dict(previous["opt"])
+        scaler.load_state_dict(previous["scaler"])
+        state = previous["state"]
+    # a resumed run restores its random streams; under torchrun only rank 0 saved them, so the others restart
+    generator = torch.Generator().manual_seed(cfg.seed + 1000 * seed + rank + (state["step"] if distributed else 0))
+    if previous and previous.get("rng") and not distributed:
+        saved_rng = previous["rng"]
+        generator.set_state(saved_rng["gen"])
+        torch.set_rng_state(saved_rng["torch"])
+        np.random.set_state(saved_rng["numpy"])
+        random.setstate(saved_rng["python"])
+        if device.type == "cuda" and saved_rng.get("cuda") is not None:
+            torch.cuda.set_rng_state(saved_rng["cuda"], device)
+    val_generator = lambda: torch.Generator().manual_seed(123)
+    start_time = last_checkpoint = time.time()
+    hours_before = state["hours"]
+    path_settings = cfg.model.path
 
     def save(done=False):
-        state["hours"], state["done"] = h0 + (time.time() - t0) / 3600, done
-        rng = dict(gen=gen.get_state(), torch=torch.get_rng_state(), numpy=np.random.get_state(), python=random.getstate(),
-                   cuda=torch.cuda.get_rng_state(device) if device.type == "cuda" else None)
-        atomic(ck, lambda f: torch.save(dict(model=model.state_dict(), opt=opt.state_dict(), scaler=scaler.state_dict(), state=state, rng=rng,
-                                             meta=dict(variant=variant, seed=seed, kind=kind, batch=B, world=world, scale=scale, steps=total_steps)), f))
-        save_json(state["log"], out / "log.json")
+        state["hours"], state["done"] = hours_before + (time.time() - start_time) / 3600, done
+        rng_state = dict(
+            gen=generator.get_state(),
+            torch=torch.get_rng_state(),
+            numpy=np.random.get_state(),
+            python=random.getstate(),
+            cuda=torch.cuda.get_rng_state(device) if device.type == "cuda" else None,
+        )
+        atomic(
+            checkpoint,
+            lambda handle: torch.save(
+                dict(
+                    model=model.state_dict(),
+                    opt=optimizer.state_dict(),
+                    scaler=scaler.state_dict(),
+                    state=state,
+                    rng=rng_state,
+                    meta=dict(
+                        variant=variant,
+                        seed=seed,
+                        kind=kind,
+                        batch=batch_size,
+                        world=world,
+                        scale=scale,
+                        steps=total_steps,
+                    ),
+                ),
+                handle,
+            ),
+        )
+        save_json(state["log"], folder / "log.json")
 
-    stop = {"now": False}                                        # Ctrl-C / kernel interrupt / kill: save first, then leave
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda *_: stop.update(now=True))
+    stop = {"now": False}  # Ctrl-C / kernel interrupt / kill: save first, then leave
+    for signal_number in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signal_number, lambda *_: stop.update(now=True))
     if rank == 0 and state["step"]:
-        print(f"resuming {variant}_s{seed} at step {state['step']} ({state['hours']:.2f} h done, batch {B})", flush=True)
+        print(
+            f"resuming {variant}_s{seed} at step {state['step']} ({state['hours']:.2f} h done, batch {batch_size})",
+            flush=True,
+        )
 
     parent = os.getppid()
     while state["step"] < total_steps:
-        hours = h0 + (time.time() - t0) / 3600
-        if os.getppid() != parent:                               # the notebook or shell that started this run is gone
+        hours = hours_before + (time.time() - start_time) / 3600
+        if os.getppid() != parent:  # the notebook or shell that started this run is gone
             stop["now"] = True
-        if ddp:                                                  # rank 0 decides, so all ranks stop at the same step
-            ctl = torch.tensor([float(stop["now"]), hours], device=device)
-            torch.distributed.broadcast(ctl, 0); stop["now"], hours = bool(ctl[0]), float(ctl[1])
+        if distributed:  # rank 0 decides, so all ranks stop at the same step
+            control = torch.tensor([float(stop["now"]), hours], device=device)
+            torch.distributed.broadcast(control, 0)
+            stop["now"], hours = bool(control[0]), float(control[1])
         if stop["now"]:
             if rank == 0:
-                save(); print(f"stopped at step {state['step']}; checkpoint saved, run again to continue", flush=True)
+                save()
+                print(f"stopped at step {state['step']}; checkpoint saved, run again to continue", flush=True)
             raise SystemExit(130)
-        prog = max(state["step"] / total_steps, hours / cap if cap else 0.0)
-        if prog >= 1:
+        progress = max(state["step"] / total_steps, hours / max_hours if max_hours else 0.0)
+        if progress >= 1:
             break
-        steps = int(round(pc.steps_start + (pc.steps_end - pc.steps_start) * min(1.0, 2 * prog)))     # path-length curriculum
-        for g in opt.param_groups:
-            g["lr"] = lr0 * 0.5 * (1 + math.cos(math.pi * prog))
-        net.train()
-        total, parts = losses(cfg, net, tracer, sample_batch(cfg, tr, protos, B, gen, device), steps, scale, device.type)
-        opt.zero_grad(set_to_none=True)
-        scaler.scale(total).backward(); scaler.unscale_(opt)
-        torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
-        scaler.step(opt); scaler.update(); state["step"] += 1
+        path_steps = int(
+            round(
+                path_settings.steps_start
+                + (path_settings.steps_end - path_settings.steps_start) * min(1.0, 2 * progress)
+            )
+        )  # path-length curriculum
+        for group in optimizer.param_groups:
+            group["lr"] = base_lr * 0.5 * (1 + math.cos(math.pi * progress))
+        network.train()
+        loss, parts = losses(
+            cfg,
+            network,
+            tracer,
+            sample_batch(cfg, train_volumes, protocols, batch_size, generator, device),
+            path_steps,
+            scale,
+            device.type,
+        )
+        optimizer.zero_grad(set_to_none=True)
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(network.parameters(), 1.0)
+        scaler.step(optimizer)
+        scaler.update()
+        state["step"] += 1
         if rank == 0 and state["step"] % cfg.steps_per_epoch == 0:
-            net.eval(); vl = []
+            network.eval()
+            val_parts = []
             with torch.no_grad():
                 # every variant reports the same validation numbers: voxel loss and accumulated path error
-                g2 = vgen(); old = cfg.model.lambda_path, pc.one_step; cfg.model["lambda_path"], pc["one_step"] = 1.0, False
+                val_gen = val_generator()
+                saved = cfg.model.lambda_path, path_settings.one_step
+                cfg.model["lambda_path"], path_settings["one_step"] = 1.0, False
                 for _ in range(8):
-                    vl.append(losses(cfg, model, tracer, sample_batch(cfg, va, protos, B, g2, device), pc.steps_end, scale, device.type)[1])
-                cfg.model["lambda_path"], pc["one_step"] = old
-            row = dict(step=state["step"], hours=round(hours, 4), hours_left=round(min(hours / state["step"] * (total_steps - state["step"]), cap - hours if cap else math.inf), 2),
-                       path_steps=steps, **{f"train_{k}": v for k, v in parts.items()},
-                       **{f"val_{k}": float(np.mean([r[k] for r in vl])) for k in vl[0]})
-            if device.type == "cuda":                            # peak since the last row; reserved far above used = fragmentation
-                row["gpu_gb"], row["gpu_reserved_gb"] = (round(x / 2 ** 30, 1) for x in (torch.cuda.max_memory_allocated(device), torch.cuda.memory_reserved(device)))
+                    val_parts.append(
+                        losses(
+                            cfg,
+                            model,
+                            tracer,
+                            sample_batch(cfg, val_volumes, protocols, batch_size, val_gen, device),
+                            path_settings.steps_end,
+                            scale,
+                            device.type,
+                        )[1]
+                    )
+                cfg.model["lambda_path"], path_settings["one_step"] = saved
+            row = dict(
+                step=state["step"],
+                hours=round(hours, 4),
+                hours_left=round(
+                    min(
+                        hours / state["step"] * (total_steps - state["step"]),
+                        max_hours - hours if max_hours else math.inf,
+                    ),
+                    2,
+                ),
+                path_steps=path_steps,
+                **{f"train_{key}": value for key, value in parts.items()},
+                **{f"val_{key}": float(np.mean([part[key] for part in val_parts])) for key in val_parts[0]},
+            )
+            if device.type == "cuda":  # peak since the last row; reserved far above used = fragmentation
+                row["gpu_gb"], row["gpu_reserved_gb"] = (
+                    round(value / 2**30, 1)
+                    for value in (torch.cuda.max_memory_allocated(device), torch.cuda.memory_reserved(device))
+                )
                 torch.cuda.reset_peak_memory_stats(device)
             state["log"].append(row)
-            print(f"step {state['step']}/{total_steps} ({100 * state['step'] / total_steps:.0f}%) | {hours:.2f} h done, "
-                  f"{row['hours_left']} h left | " + " ".join(f"{k} {v:.4g}" for k, v in row.items() if k.startswith(("train_", "val_", "gpu_"))), flush=True)
-        if rank == 0 and time.time() - last_ck > cfg.model.ckpt_minutes * 60:
-            save(); last_ck = time.time()
+            print(
+                f"step {state['step']}/{total_steps} ({100 * state['step'] / total_steps:.0f}%) | {hours:.2f} h done, "
+                f"{row['hours_left']} h left | "
+                + " ".join(
+                    f"{key} {value:.4g}" for key, value in row.items() if key.startswith(("train_", "val_", "gpu_"))
+                ),
+                flush=True,
+            )
+        if rank == 0 and time.time() - last_checkpoint > cfg.model.ckpt_minutes * 60:
+            save()
+            last_checkpoint = time.time()
     if rank == 0:
         save(done=True)
-    if ddp:
+    if distributed:
         torch.distributed.destroy_process_group()
-    return out
+    return folder
 
 
 def take_over(lock, owner=True, wait=600):
-    """One process per run folder. `lock` holds "host pid" of the process training there. If that process is still
-    alive on this machine (a run left behind by a killed notebook), it is asked to save and stop, and this call
-    waits for it. Processes of the same torchrun group are not each other's rivals. owner: write the lock."""
-    host, me = socket.gethostname(), os.getpid()
+    """One process per run folder: a live earlier process named in `lock` ("host pid") is asked to save and stop,
+    and this call waits for it (torchrun ranks excepted). owner: write the lock."""
+    host, own_pid = socket.gethostname(), os.getpid()
     if lock.exists():
-        h, _, pid = lock.read_text().partition(" ")
+        host_name, _, pid = lock.read_text().partition(" ")
         pid = int(pid) if pid.strip().isdigit() else -1
         alive = lambda: _alive(pid)
         try:
-            rival = h == host and pid not in (-1, me) and alive() and os.getpgid(pid) != os.getpgid(0)
-        except ProcessLookupError:                               # it exited between the two checks
+            rival = host_name == host and pid not in (-1, own_pid) and alive() and os.getpgid(pid) != os.getpgid(0)
+        except ProcessLookupError:  # it exited between the two checks
             rival = False
         if rival:
             if owner:
                 print(f"another process ({pid}) is training this run; asking it to save and stop", flush=True)
                 os.kill(pid, signal.SIGINT)
-            t0 = time.time()
-            while alive() and time.time() - t0 < wait:
+            start_time = time.time()
+            while alive() and time.time() - start_time < wait:
                 time.sleep(1)
             if alive():
                 raise RuntimeError(f"process {pid} still holds {lock.parent}; stop it and run again")
     if owner:
-        lock.write_text(f"{host} {me}")
-        atexit.register(lambda: lock.exists() and lock.read_text() == f"{host} {me}" and lock.unlink())
+        lock.write_text(f"{host} {own_pid}")
+        atexit.register(lambda: lock.exists() and lock.read_text() == f"{host} {own_pid}" and lock.unlink())
 
 
 def _alive(pid):
     try:
-        os.kill(pid, 0); return True
+        os.kill(pid, 0)
+        return True
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -342,29 +490,31 @@ def _alive(pid):
 def clear_outputs(cfg, variant, seed):
     """Remove cached fODFs, tractograms and scores of an earlier network with this name, so that a retrained
     network is never mixed with results of the old one."""
-    pat = re.compile(rf"_net_{re.escape(variant)}_s{seed}([._+]|$)")
-    for f in (cfg.P.out / "cache").glob(f"*/*_net_{variant}_s{seed}*"):
-        if pat.search(f.name):
-            f.unlink()
+    pattern = re.compile(rf"_net_{re.escape(variant)}_s{seed}([._+]|$)")
+    for path in (cfg.P.out / "cache").glob(f"*/*_net_{variant}_s{seed}*"):
+        if pattern.search(path.name):
+            path.unlink()
 
 
 def load_trained(cfg, variant, seed, device):
     """Returns (model, cfg adjusted to the variant)."""
     kind = apply_variant(cfg, variant)
-    s = torch.load(run_dir(cfg, variant, seed) / "last.pt", map_location=device, weights_only=False)
-    model = build_model(cfg, kind).to(device); model.load_state_dict(s["model"]); model.eval()
-    return model, s["meta"]
+    checkpoint = torch.load(run_dir(cfg, variant, seed) / "last.pt", map_location=device, weights_only=False)
+    model = build_model(cfg, kind).to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    return model, checkpoint["meta"]
 
 
-def net_fodf(cfg, ses, name, method, model, device):
+def net_fodf(cfg, session, name, method, model, device):
     """Run a trained network on protocol `name` and cache its fODF under `method` (e.g. net_path_s0)."""
-    f = PL.sdir(cfg, ses, method) / f"fodf_{name}_{method}.npz"
-    if f.exists():
+    path = PL.sdir(cfg, session, method) / f"fodf_{name}_{method}.npz"
+    if path.exists():
         return
-    a = PL.load_anat(cfg, ses)
-    sh = predict(cfg, model, PL.net_input(cfg, ses, name, a, cfg.model.input), PL.anat_channels(a), device)
-    sh = sh * (a["pve"][0] > cfg.wm_mask_thr)
-    PL.save_fodf(cfg, ses, name, method, sh, a["affine"], a["pve"])
+    anat = PL.load_anat(cfg, session)
+    sh = predict(cfg, model, PL.net_input(cfg, session, name, anat, cfg.model.input), PL.anat_channels(anat), device)
+    sh = sh * (anat["pve"][0] > cfg.wm_mask_thr)
+    PL.save_fodf(cfg, session, name, method, sh, anat["affine"], anat["pve"])
 
 
 def net_fodf_all(cfg, sessions, names, method, model, device, desc=None):
@@ -373,31 +523,98 @@ def net_fodf_all(cfg, sessions, names, method, model, device, desc=None):
     writing the fODFs take longer than the forward pass."""
     from concurrent.futures import ThreadPoolExecutor
     from tqdm.auto import tqdm
-    todo = [s for s in sessions if not all((PL.sdir(cfg, s, method) / f"fodf_{n}_{method}.npz").exists() for n in names)]
+
+    todo = [
+        session
+        for session in sessions
+        if not all((PL.sdir(cfg, session, method) / f"fodf_{name}_{method}.npz").exists() for name in names)
+    ]
     PL.inputs_for(cfg, todo, names, cfg.model.input, f"{method}: inputs")
 
-    def one(ses):
+    def predict_session(session):
         for name in names:
-            net_fodf(cfg, ses, name, method, model, device)
+            net_fodf(cfg, session, name, method, model, device)
 
-    with ThreadPoolExecutor(max(1, int(cfg.gpu_jobs))) as ex:
-        list(tqdm(ex.map(one, sessions), total=len(sessions), desc=desc or method))
+    with ThreadPoolExecutor(max(1, int(cfg.gpu_jobs))) as executor:
+        list(tqdm(executor.map(predict_session, sessions), total=len(sessions), desc=desc or method))
+
+
+def path_errors(cfg, sessions, combos, name, device):
+    """Path error (model.path_error) of every session x (protocol, method) against the reference fODF, with the
+    tracer and path length of the training loss and one seed per V1-V3 vertex. Cached per file; writes
+    outputs/results/<name>.csv and returns the table."""
+    import pandas as pd
+    from tqdm.auto import tqdm
+
+    settings = cfg.model.path
+    signature = json.dumps(
+        [settings.cone_deg, settings.sharpen, settings.steps_end, settings.step_mm, cfg.tracking.seed_depth_mm]
+    )
+    tracer = PathTracer(cfg.sh_order_out, settings.cone_deg, settings.sharpen).to(device)
+    on_device = lambda array: torch.as_tensor(np.asarray(array, np.float32))[None].to(device)
+    rows = []
+    for session in tqdm(sessions, desc=name):
+        files = {combo: PL.sdir(cfg, session, combo[1]) / f"patherr_{combo[0]}_{combo[1]}.json" for combo in combos}
+        cached = {combo: load_json(file) for combo, file in files.items() if file.exists()}
+        cached = {combo: row for combo, row in cached.items() if row.get("settings") == signature}
+        if len(cached) < len(combos):
+            anat = PL.load_anat(cfg, session)
+            vertices = np.flatnonzero(anat["area"] > 0)
+            seeds = on_device(
+                anat["verts_vox"][vertices] - cfg.tracking.seed_depth_mm / cfg.ref_voxel * anat["normals_vox"][vertices]
+            )
+            inward = on_device(-anat["normals_vox"][vertices])
+            reference = on_device(PL.fodf(cfg, session, "REF", "msmt_csd", anat=anat)["sh"])
+            wm = on_device(anat["pve"][0])[None]
+        for protocol, method in combos:
+            if (protocol, method) not in cached:
+                predicted = on_device(PL.on_ref_grid(PL.fodf(cfg, session, protocol, method, anat=anat), anat))
+                mean, end, n_paths = path_error(
+                    tracer,
+                    predicted,
+                    reference,
+                    wm,
+                    seeds,
+                    inward,
+                    settings.steps_end,
+                    settings.step_mm / cfg.ref_voxel,
+                    cfg.ref_voxel,
+                )
+                cached[(protocol, method)] = dict(
+                    sid=session["sid"],
+                    protocol=protocol,
+                    method=method,
+                    path_err_mm=mean,
+                    path_end_err_mm=end,
+                    n_paths=n_paths,
+                    settings=signature,
+                )
+                save_json(cached[(protocol, method)], files[(protocol, method)])
+            rows.append({key: value for key, value in cached[(protocol, method)].items() if key != "settings"})
+    table = pd.DataFrame(rows)
+    folder = cfg.P.out / "results"
+    folder.mkdir(exist_ok=True)
+    table.to_csv(folder / f"{name}.csv", index=False)
+    return table
 
 
 def trained_runs(cfg):
     """[(variant, seed)] of the runs listed in config.yaml that have finished training."""
     from .jobs import train_commands
-    out = []
+
+    runs = []
     for name, _ in train_commands(cfg):
-        ck = cfg.P.out / "models" / name / "last.pt"
-        if ck.exists() and torch.load(ck, map_location="cpu", weights_only=False)["state"]["done"]:
-            v, s = name.rsplit("_s", 1); out.append((v, int(s)))
-    return out
+        checkpoint = cfg.P.out / "models" / name / "last.pt"
+        if checkpoint.exists() and torch.load(checkpoint, map_location="cpu", weights_only=False)["state"]["done"]:
+            variant, seed = name.rsplit("_s", 1)
+            runs.append((variant, int(seed)))
+    return runs
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--variant", default="path", choices=list(VARIANTS)); ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--dev", action="store_true")
-    a = ap.parse_args()
-    train(load_config(a.dev), a.variant, a.seed)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--variant", default="path", choices=list(VARIANTS))
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--dev", action="store_true")
+    arguments = parser.parse_args()
+    train(load_config(arguments.dev), arguments.variant, arguments.seed)
