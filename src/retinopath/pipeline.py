@@ -605,6 +605,31 @@ def robustness_rows(cfg, ses, variants):
     return rows
 
 
+def sampling_rows(cfg, ses, combos, threshold):
+    """For each (protocol, method) of one session: the scores of the same fODF tracked with the sampling threshold
+    `threshold`, and the width of its lobes at the threshold of the main tracker."""
+    anat = load_anat(cfg, ses)
+    adjusted = copy.deepcopy(cfg)
+    adjusted.tracking["pmf_threshold"] = threshold
+    rows = []
+    for name, method in combos:
+        tractogram = tract(adjusted, ses, name, method, anat=anat, tag=f"_pmf_threshold{threshold}")
+        volume = on_ref_grid(fodf(cfg, ses, name, method, anat=anat), anat)
+        rows.append(
+            dict(
+                sid=ses["sid"],
+                protocol=name,
+                method=method,
+                lobe_width=M.lobe_width(volume, anat["pve"][0] > 0.5, cfg.tracking.pmf_threshold),
+                n_pairs=int(len(tractogram["a"])),
+                **M.retinotopic_scores(
+                    anat, tractogram["a"], tractogram["b"], tractogram["pair"], adjusted, seed=cfg.seed
+                ),
+            )
+        )
+    return rows
+
+
 def _gpu_fits(cfg, sessions, fits, device, errors):
     try:
         for session in sessions:

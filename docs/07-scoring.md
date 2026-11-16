@@ -141,6 +141,21 @@ The reference tractogram of every test subject is scored again with one choice c
 - Key from each half of the pRF runs.
 - Dorsal, ventral, left and right streamlines separately (subsets with more than 50 streamlines).
 
+## Sampling threshold and lobe width (`pipeline.sampling_rows`, notebook 08)
+
+The sampling threshold of the tracker was chosen on the development subjects, so the comparison of the networks
+is repeated with DIPY's default. For classical CSD and every training seed of `path` and `voxel` on the
+clinical-grade protocols, the same fODF is tracked again from the same seeds with `pmf_threshold` 0.1 and scored
+(`sampling.csv`, one row per subject, protocol and method; the tractograms are cached beside those of the main
+tracker with the suffix `_pmf_threshold0.1`).
+
+The same table holds `lobe_width` (`metrics.lobe_width`): the fraction of the 724 sphere directions with an
+amplitude of at least `tracking.pmf_threshold` (0.7) of the largest amplitude in the voxel, averaged over the
+voxels used for ACC. These are the directions the main tracker can draw from before the turning cone is applied.
+A narrower lobe alone raises RSI with a sampling tracker ([09-development.md](09-development.md)), so the width
+shows whether a difference in RSI between two methods can come from how peaked their lobes are and not from
+where they point.
+
 ## One result row (`pipeline.scores`)
 
 `scores(cfg, ses, protocol, method)` tracks if needed and returns one row per session × protocol × method:
@@ -224,5 +239,8 @@ part of the confirmatory family. Drawn as Figure 8.
 - **Other keys** (`alternative_key_tests.csv`, descriptive). `path` vs `voxel` with the group-average and with the
   atlas key, per clinical protocol; and the Spearman correlation between measured-key and atlas-key RSI over all
   rows of the reference, protocol and network tables.
+- **Sampling threshold and lobe width** (`sampling_tests.csv`, descriptive). From `sampling.csv`, per clinical
+  protocol, networks averaged over seeds: RSI at the sampling threshold of 0.1 and lobe width, each as `path` −
+  `voxel`, `path` − CSD and `voxel` − CSD, paired and two-sided.
 - **External data** (`external_tests.csv`, descriptive). On HCP 7T and NSD: `path` − `voxel` and `path` − CSD,
   paired. With 8 NSD subjects these are reported with their intervals and are not part of the confirmatory family.

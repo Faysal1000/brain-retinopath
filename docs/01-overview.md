@@ -130,7 +130,7 @@ dataset would have.
 | `05_training` | All network variants | `outputs/models/` |
 | `06_inference_eval` | Networks on the clinical-grade protocols (H2, H3); path error of CSD and the networks | `learned.csv`, `path_error.csv` |
 | `07_external_tests` | HCP 7T, HCP retest, NSD | `external_*.csv`, `retest_*.csv`, `nsd_run_overlap.csv` |
-| `08_ablations_robustness` | Other analysis choices, ablations | `robustness.csv` |
+| `08_ablations_robustness` | Other analysis choices, default sampling threshold, lobe width, ablations | `robustness.csv`, `sampling.csv` |
 | `09_stats_figures_tables` | Tests, comparison with classical CSD, training size, pairwise comparisons, summary tables | `*_tests.csv` (including `confirmatory_tests.csv`, `csd_comparison_tests.csv`, `training_size_tests.csv`), `*_results.csv` |
 | `10_figures` | Paper figures, from saved files only | `outputs/figures/fig*.pdf`, `.png` |
 

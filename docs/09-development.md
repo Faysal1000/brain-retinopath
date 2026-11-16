@@ -420,6 +420,35 @@ classical CSD (-0.092, p 0.13). ACC rises with the number of training subjects f
 error stays lower for the path network than for the voxel network and classical CSD. This is why the confirmatory
 analysis trains on 12 subjects and the experiment is repeated with 35 and 100 (`training_size_runs` in `config.yaml`).
 
+## Lobe width
+
+A narrower fODF lobe alone raises RSI with a sampling tracker (the table of powers above), so a difference in RSI
+between two networks could come from how peaked their lobes are. The lobe width is the share of the 724 sphere
+directions with an amplitude of at least 0.7 of the largest amplitude in the voxel, the directions the scoring
+tracker can draw from, averaged over white matter (wm > 0.5). The reference has 4.04%.
+
+| method | lobe width (%) P1 | lobe width (%) P2 | lobe width (%) P3 |
+|---|---|---|---|
+| classical CSD | 3.84 | 9.50 | 10.37 |
+| voxel 12 | 4.01 | 5.87 | 5.68 |
+| path 12 | 4.01 | 6.07 | 5.87 |
+| voxel 35 | 3.98 | 5.78 | 5.66 |
+| path 35 | 3.97 | 6.08 | 5.94 |
+
+| paired difference | P1 | P2 | P3 |
+|---|---|---|---|
+| lobe width: path 12 − voxel 12 | -0.006 (2/12 higher, p 0.052) | +0.204 (12/12 higher, p 0.00049) | +0.197 (12/12 higher, p 0.00049) |
+| lobe width: path 35 − voxel 35 | -0.003 (3/12 higher, p 0.092) | +0.262 (12/12 higher, p 0.00049) | +0.301 (12/12 higher, p 0.00049) |
+| lobe width: path 12 − classical CSD | +0.157 (0/12 lower, p 0.00049) | -3.421 (12/12 lower, p 0.00049) | -4.463 (12/12 lower, p 0.00049) |
+| lobe width: voxel 12 − classical CSD | +0.164 (0/12 lower, p 0.00049) | -3.643 (12/12 lower, p 0.00049) | -4.654 (12/12 lower, p 0.00049) |
+
+Both networks narrow the lobes of classical CSD on P2 and P3, towards the width of the reference. The lobes of the
+path network are not narrower than those of the voxel network; on P2 and P3 they are slightly wider in every
+subject. The higher RSI of the path network with 12 training subjects does not come from narrower lobes, and the
+voxel network is below classical CSD there with much narrower lobes. The main run measures the same width on the
+test subjects and tracks both networks and classical CSD again with DIPY's default threshold
+([07-scoring.md](07-scoring.md#sampling-threshold-and-lobe-width-pipelinesampling_rows-notebook-08)).
+
 ## SH order of classical CSD
 
 Classical CSD on P2 (32 directions) is fitted at SH order 4. Fitted at order 6 instead and tracked the same way

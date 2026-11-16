@@ -247,3 +247,13 @@ def voxel_metrics(pred, ref, mask):
     reference_peak = directions[(ref[:, mask].T @ sh_basis.T).argmax(1)]
     angle = np.degrees(np.arccos(np.clip(np.abs((predicted_peak * reference_peak).sum(1)), 0, 1)))
     return float(np.mean(acc)), float(np.median(angle))
+
+
+def lobe_width(sh, mask, threshold):
+    """Fraction of sphere directions (symmetric724) with amplitude of at least `threshold` x the largest amplitude of
+    the voxel, averaged over `mask`: how many directions a tracker with this sampling threshold can draw from.
+    sh: (n_coef, X, Y, Z)."""
+    mask = mask & (np.abs(sh[1:]).sum(0) > 0)
+    amplitude = sh[:, mask].T @ sh_matrix(tracking_sphere().vertices, int((np.sqrt(8 * sh.shape[0] + 1) - 3) / 2)).T
+    peak = amplitude.max(1, keepdims=True)
+    return float((amplitude[peak[:, 0] > 0] >= threshold * peak[peak[:, 0] > 0]).mean())
