@@ -403,6 +403,7 @@ ETag.
 |---|---|
 | `subjects.json` | `test`, `train`, `val`, `t7`, `retest`, `nsd` |
 | `models/<run>/last.pt` | Checkpoint ([06-network.md](06-network.md#training-loop-traintrain)) |
+| `models/<run>/best.pt` | Weights with the lowest validation path error; used for inference |
 | `models/<run>/log.json` | One row per epoch (below) |
 | `models/<run>/pid` | Host and process ID of the process training the run |
 | `logs/<run>.log` | Console output of a training run |

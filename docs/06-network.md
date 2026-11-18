@@ -153,6 +153,11 @@ ranks restart their generators at the step the run resumes from.
   SIGINT or SIGTERM (the run then exits with code 130) and at the end with `done` set. A finished run is skipped.
   A run whose checkpoint was made for a different total number of steps stops with a message, so all networks
   train equally long; delete its folder to train it again.
+- **Best on validation.** After each validation, if the validation path error (`val_path_mm`) is the lowest so far,
+  the weights go to `best.pt` with `meta` plus that step and error. Inference (`load_trained`) uses `best.pt`, never
+  the last step: with few training subjects the validation error rises again late in training (overfitting). Every
+  variant is selected on the same number, from validation subjects only. A run trained before `best.pt` existed
+  stops inference with a message; delete its folder and train it again.
 - **Fresh start.** A run that starts without a checkpoint deletes cached fODFs, tractograms and scores of an
   earlier network with the same name (`clear_outputs`), so a retrained network is never mixed with results of the
   old one.

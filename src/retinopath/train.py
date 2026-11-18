@@ -199,7 +199,7 @@ def auto_batch(cfg, model, tracer, volumes, protocols, device, scale, resumed=No
 
 # ---------------------------------------------------------------- training loop
 def train(cfg, variant="path", seed=0, subjects=None):
-    """Train one (variant, seed) into outputs/models/<variant>_s<seed>/ (last.pt, log.json); resumes from last.pt.
+    """Train one (variant, seed) into outputs/models/<variant>_s<seed>/ (last.pt, best.pt, log.json); resumes from last.pt.
     Progress = max(step / (epochs * steps_per_epoch), hours / max_train_hours); it drives the cosine learning rate
     and the path-length curriculum, and training ends at 1. SIGINT/SIGTERM save a checkpoint and exit with 130."""
     reference_cfg = copy.deepcopy(cfg)
@@ -325,20 +325,31 @@ def train(cfg, variant="path", seed=0, subjects=None):
                     scaler=scaler.state_dict(),
                     state=state,
                     rng=rng_state,
-                    meta=dict(
-                        variant=variant,
-                        seed=seed,
-                        kind=kind,
-                        batch=batch_size,
-                        world=world,
-                        scale=scale,
-                        steps=total_steps,
-                    ),
+                    meta=meta(),
                 ),
                 handle,
             ),
         )
         save_json(state["log"], folder / "log.json")
+
+    def meta():
+        return dict(
+            variant=variant, seed=seed, kind=kind, batch=batch_size, world=world, scale=scale, steps=total_steps
+        )
+
+    def save_best(row):
+        """best.pt: the weights with the lowest validation path error so far (validation subjects only), the model
+        that inference uses. Every variant is selected on the same number."""
+        if row["val_path_mm"] >= state.get("best_val_path_mm", math.inf):
+            return
+        state["best_val_path_mm"], state["best_step"] = row["val_path_mm"], row["step"]
+        atomic(
+            folder / "best.pt",
+            lambda handle: torch.save(
+                dict(model=model.state_dict(), meta=dict(meta(), step=row["step"], val_path_mm=row["val_path_mm"])),
+                handle,
+            ),
+        )
 
     stop = {"now": False}  # Ctrl-C / kernel interrupt / kill: save first, then leave
     for signal_number in (signal.SIGINT, signal.SIGTERM):
@@ -433,6 +444,7 @@ def train(cfg, variant="path", seed=0, subjects=None):
                 )
                 torch.cuda.reset_peak_memory_stats(device)
             state["log"].append(row)
+            save_best(row)
             print(
                 f"step {state['step']}/{total_steps} ({100 * state['step'] / total_steps:.0f}%) | {hours:.2f} h done, "
                 f"{row['hours_left']} h left | "
@@ -499,7 +511,13 @@ def clear_outputs(cfg, variant, seed):
 def load_trained(cfg, variant, seed, device):
     """Returns (model, cfg adjusted to the variant)."""
     kind = apply_variant(cfg, variant)
-    checkpoint = torch.load(run_dir(cfg, variant, seed) / "last.pt", map_location=device, weights_only=False)
+    best = run_dir(cfg, variant, seed) / "best.pt"
+    if not best.exists():
+        raise FileNotFoundError(
+            f"{best}: no best-on-validation checkpoint (runs trained before it was added); delete "
+            f"{best.parent} and train it again"
+        )
+    checkpoint = torch.load(best, map_location=device, weights_only=False)
     model = build_model(cfg, kind).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
