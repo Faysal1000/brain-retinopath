@@ -166,7 +166,7 @@ stats:
 
 # ---- training-size analysis (docs/04-configuration.md) ----------------------------------
 # Output folders of the same experiment run with other n_train. Notebooks 09 and 10 read the folders that exist.
-training_size_runs: {35: outputs_train35, 100: outputs_train100}
+training_size_runs: {35: outputs_train35, 100: outputs_train100, 200: outputs_train200}
 
 # ---- cluster (optional) -----------------------------------------------------------------
 multi_gpu: jobs             # several GPUs: jobs = one training run per GPU | ddp = every run uses all GPUs

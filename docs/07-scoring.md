@@ -224,7 +224,7 @@ more closely than the fODF it starts from and than the same network trained on v
 ### Training size (`training_size_tests.csv`)
 
 Both families above are tested on the networks trained with 12 subjects (`n_train` in `config.yaml`). The whole
-experiment is repeated with 35 and 100 training subjects, on the same test subjects
+experiment is repeated with 35, 100 and optionally 200 training subjects, on the same test subjects
 ([04-configuration.md](04-configuration.md#training-size)). Notebook 09 stacks the H3 tests and the comparison
 with classical CSD of every size into one table, with the column `n_train` and the Holm correction made within
 each size and family. These rows describe how the effects change with the amount of training data; they are not

@@ -60,8 +60,8 @@ message when the file does not match `n_test`, `n_train` or `n_val`.
 ## Training size
 
 The experiment is run with 12 training subjects (the confirmatory analysis: a paired set of this size is what one
-site can collect) and repeated with 35 and 100. Each further size is one more run with its own output folder: set
-`n_train` and `paths.out` (`n_train: 35`, `out: outputs_train35`; then `n_train: 100`, `out: outputs_train100`)
+site can collect) and repeated with 35, 100 and optionally 200. Each further size is one more run with its own output folder: set
+`n_train` and `paths.out` (`n_train: 35`, `out: outputs_train35`; then `n_train: 100`, `out: outputs_train100`; likewise for 200)
 and run `run_all.sh full`. These runs need only the two main networks (`variants: [path, voxel]`); the ablations
 belong to the 12-subject run. The runs share `data/` (crops, reference and classical fODFs, their tractograms and
 scores), so a further run only trains its networks and scores them; it keeps its own `subjects.json`, networks,
