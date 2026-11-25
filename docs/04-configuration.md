@@ -32,7 +32,7 @@ The chosen block is merged over the top-level keys. Both blocks hold the same ke
 | `base_channels` | U-Net width | 48 | multiple of 8 | Memory and time grow about quadratically |
 | `train_protocols` | Network inputs in training | P1, P2, P3, D32, T7 | names under `protocols` or `extra_protocols` | One more cached input per training subject; T7 (b = 1000 and 2000, 1.25 mm) is similar to the HCP 7T scan |
 | `keep_raw` | Keep the raw HCP diffusion folder after cropping | `true` | | `false` saves about 1.3 GB per subject; a re-download is then needed if the crop settings change |
-| `n_null` | Surrogates per streamline | 100 | none; below 20 is noisy | Smoother null, linear time and memory |
+| `n_null` | Surrogates per streamline | 20 | below 20 is noisy | Smoother null, linear time and memory; a streamline with fewer distance-matched vertices than `n_null` is left out, and on the fsLR mesh few have more than 20 (none have 100) |
 | `n_jobs` | CPU workers for the per-session steps | -2 (all cores but one) | a number, or negative to count back from all cores | Faster; about 2 GB of memory per worker |
 | `gpu_jobs` | Sessions at once in network inference (notebooks 06, 07) | 4 | 1 or more | File reading and writing overlap with GPU work; results do not depend on it |
 | `run_protocols` | Protocols evaluated | 9 | names under `protocols` | One more column of the grid |

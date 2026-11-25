@@ -68,12 +68,14 @@ Only streamlines with both ends valid in the key are scored.
   two ends (`ree`, degrees), the absolute log ratio of their eccentricities (`dlogecc`), and the polar-angle
   difference (`dang`, degrees, wrapped to 0–180).
 - **Distance-matched null** (`null_error`). Neighbouring cortex has similar retinotopy, so a short streamline has a
-  small error for free. For each streamline, end `a` stays and end `b` is replaced by `n_null` (100) random valid
+  small error for free. For each streamline, end `a` stays and end `b` is replaced by `n_null` (20) random valid
   vertices of the same area and hemisphere as `b` whose distance from `a` matches the real distance d within
   max(`null_tol` × d, `null_tol_min_mm`) (10%, at least 1 mm). The matches are drawn uniformly without
   replacement. Distance is straight-line, or for the geodesic version along the white surface (Dijkstra on the
   mesh graph of edge lengths, `build_graph`; `Geodesic` keeps the distances from each vertex, so all tractograms
-  of a session share them). A streamline with fewer than `n_null` matches gets NaN.
+  of a session share them). A streamline with fewer than `n_null` matches gets NaN. The tolerance band holds few
+  mesh vertices, so `n_null` stays small: with 20 about 40% of streamlines have a full null (most of the V1–V3
+  ones, fewer of the short V1–V2 and V2–V3 ones); with 100 almost none do.
 - **RSI** (`rsi`): `1 − median(observed error) / median(null error)` over the streamlines that have a full null;
   NaN with fewer than 20. 0 means the tractogram is no more retinotopic than distance alone predicts; 1 means
   every streamline joins points with the same visual-field position.

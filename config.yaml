@@ -37,7 +37,7 @@ full:
   patch: 48                 # cubic training patch (voxels); multiple of 2^(levels-1), >= 40 for the 40-step path
   base_channels: 48         # U-Net width; multiple of 8
   seeds_per_vertex: 10      # tractography seeds per V1-V3 white-surface vertex
-  n_null: 100               # distance-matched surrogates per streamline; >= 20
+  n_null: 20                # distance-matched surrogates per streamline; >= 20 (larger leaves most streamlines without a full null set)
   n_jobs: -2                # CPU workers; negative counts back from all cores (-1 = all, -2 = all but one)
   gpu_jobs: 4               # sessions at once in network inference (notebooks 06, 07); results do not depend on it
   keep_raw: true            # false = delete the raw HCP diffusion folder after cropping
